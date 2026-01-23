@@ -25,12 +25,12 @@ module inverse_top #(
     output reg        [BRAM_WR_ADDR_WIDTH-1:0] bram_wr_addr,
 
     // connect to divider
-    // input      signed [] s_axis_din_tdata,
-    // input                s_axis_din_tvalid,
-    // output reg signed [] m_axis_dividend_tdata,
-    // output reg           m_axis_dividend_tvalid,
-    // output reg signed [] m_axis_divisor_tdata,
-    // output reg           m_axis_divisor_tvalid,
+    input      signed [] s_axis_din_tdata,
+    input                s_axis_din_tvalid,
+    output reg signed [] m_axis_dividend_tdata,
+    output reg           m_axis_dividend_tvalid,
+    output reg signed [] m_axis_divisor_tdata,
+    output reg           m_axis_divisor_tvalid,
 
     output reg                                 done
 );
@@ -77,6 +77,12 @@ module inverse_top #(
     reg signed [DATA_WIDTH*2-1:0] g12_imag_acc;
     reg signed [DATA_WIDTH*2-1:0] g21_real_acc;
     reg signed [DATA_WIDTH*2-1:0] g22_real_acc;
+
+    wire signed [DATA_WIDTH*2-1:0] g12_real_acc_sqr;
+    wire signed [DATA_WIDTH*2-1:0] g12_imag_acc_sqr;
+
+    assign g12_real_acc_sqr = g12_real_acc * g12_real_acc;
+    assign g12_imag_acc_sqr = g12_imag_acc * g12_imag_acc;
     
     reg signed [DATA_WIDTH*2-1:0] det;
     reg signed [DATA_WIDTH*2-1:0] inv_det;
@@ -97,7 +103,7 @@ module inverse_top #(
             S_PLUS:        next_state = S_CALDET1;
             S_CALDET1:     next_state = S_CALDET2;
             S_CALDET2:     next_state = S_INVDET;
-            S_INVDET:
+            S_INVDET:      next_state = 
             S_DONE: 
             default: next_state = S_IDLE; 
         endcase
@@ -146,7 +152,7 @@ module inverse_top #(
                     det <= g11_real_acc * g22_real_acc;
                 end 
                 S_CALDET2: begin
-                    det <= det - (g12_real_acc * g12_real_acc + g12_imag_acc * g12_imag_acc);
+                    det <= det - (g12_real_acc_sqr + g12_imag_acc_sqr);
                 end
                 S_INVDET: begin
                     inv_det <= 1/det;
