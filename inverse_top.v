@@ -5,48 +5,59 @@ module inverse_top #(
     parameter BRAM_RD_ADDR_WIDTH   = 10,
     parameter BRAM_WR_ADDR_WIDTH   = 10,
     parameter BRAM_RD_INCREASE     = 4,
+    parameter BRAM_WR_INCREASE     = 4,
     parameter MIC_NUM              = 8,
     parameter SOR_NUM              = 2,
     parameter FREQ_NUM             = 257,
-    parameter DOUT_TDATA_WIDTH     = 48,
+    parameter DIVOUT_TDATA_WIDTH   = 48,
+    parameter DIVOUT_F_WIDTH       = 16,
     parameter DIVISOR_TDATA_WIDTH  = 32, 
     parameter DIVIDEND_TDATA_WIDTH = 32,
-    parameter signed [DATA_WIDTH-1:0] LAMBDA = 16'sh0000A4 // signed 164, s10.14
+    parameter LAMBDA               = 16'sh0000A4 // signed 164, s10.14
 )(
-    input                                      clk,
-    input                                      rst_n,
-    input                                      start,
+    input                                        clk,
+    input                                        rst_n,
+    input                                        start,
+    output reg                                   done,
+    output reg                                   all_freq_finish,
 
     // read bram data
-    input      signed [DATA_WIDTH-1:0]         af_bram_rd_real,
-    input      signed [DATA_WIDTH-1:0]         af_bram_rd_imag,
-    output reg        [BRAM_RD_ADDR_WIDTH-1:0] bram_rd_addr,
+    input      signed [DATA_WIDTH-1:0]           af_bram_rd_real,
+    input      signed [DATA_WIDTH-1:0]           af_bram_rd_imag,
+    output reg        [BRAM_RD_ADDR_WIDTH-1:0]   bram_rd_addr,
 
     // write bram data
-    output reg signed [DATA_WIDTH-1:0]         result_bram_wr_real,
-    output reg signed [DATA_WIDTH-1:0]         result_bram_wr_imag,
-    output reg        [BRAM_WR_ADDR_WIDTH-1:0] bram_wr_addr,
+    output reg signed [DATA_WIDTH*3-1:0]         result_bram_wr_real,
+    output reg signed [DATA_WIDTH*3-1:0]         result_bram_wr_imag,
+    output reg        [BRAM_WR_ADDR_WIDTH-1:0]   bram_wr_addr,
+    output reg        [3:0]                      bram_wr_we,
+    output reg                                   bram_wr_en,
 
-    // connect to divider
-    input      signed [] s_axis_din_tdata,
-    input                s_axis_din_tvalid,
-    output reg signed [] m_axis_dividend_tdata,
-    output reg           m_axis_dividend_tvalid,
-    output reg signed [] m_axis_divisor_tdata,
-    output reg           m_axis_divisor_tvalid,
+    // from divider
+    input      signed [DIVOUT_TDATA_WIDTH-1:0]   m_axis_dout_tdata,
+    input                                        m_axis_dout_tvalid,
 
-    output reg                                 done
+    // to divider
+    output reg signed [DIVIDEND_TDATA_WIDTH-1:0] s_axis_dividend_tdata,
+    output reg                                   s_axis_dividend_tvalid,
+    output reg signed [DIVISOR_TDATA_WIDTH-1:0]  s_axis_divisor_tdata,
+    output reg                                   s_axis_divisor_tvalid
 );
 
-    localparam S_IDLE        = 0;
-    localparam S_RD          = 1; // AH * A
-    localparam S_UPDATE_ADDR = 2; 
-    localparam S_PLUS        = 3; // G = AH * A + lambda * I
-    localparam S_CALDET1     = 4; // det
-    localparam S_CALDET2     = 5; // G -> G^-1
-    localparam S_INVDET      = 6; 
-    localparam S_WAITDIV     = 7;
-    localparam S_DONE        = 8; // W = G^-1 * AH
+    localparam S_IDLE           = 0;  // wait start
+    localparam S_RD             = 1;  // read bram data
+    localparam S_UPDATE_RD_ADDR = 2;  // update bram read address
+    localparam S_PLUS           = 3;  // plus lambda * I to G
+    localparam S_CALDET1        = 4;  // calculate g11 * g22
+    localparam S_CALDET2        = 5;  // calculate det - (g12_real_acc_sqr + g12_imag_acc_sqr)
+    localparam S_INVDET         = 6;  // set dividend and divisor to divider
+    localparam S_SETDIV         = 7;  // set dividend and divisor valid to divider
+    localparam S_WAITDIV        = 8;  // wait divider result
+    localparam S_CALINVG        = 9;  // calculate inverse of G
+    localparam S_CALRESULT      = 10; // calculate result elements
+    localparam S_WR             = 11; // write result to bram
+    localparam S_UPDATE_WR_ADDR = 12; // update bram write address
+    localparam S_DONE           = 13; // done
 
     localparam TOTAL_NUM = MIC_NUM * SOR_NUM * FREQ_NUM;
     localparam PER_FREQ  = MIC_NUM * SOR_NUM;
@@ -69,27 +80,54 @@ module inverse_top #(
     // ==============================
     reg [3:0] state;
     reg [3:0] next_state;
-    reg [2:0] sor0_cnt;
+    reg [2:0] sor_cnt;
     reg [3:0] rd_cnt;
+    reg [3:0] wr_cnt;
     reg       flag_rd_sor1;
+    reg       result_row1;
+    reg [8:0] freq_sample_cnt;
 
     reg signed [DATA_WIDTH-1:0] sor0_temp_real [0:MIC_NUM-1];
     reg signed [DATA_WIDTH-1:0] sor0_temp_imag [0:MIC_NUM-1];
+    reg signed [DATA_WIDTH-1:0] sor1_temp_real [0:MIC_NUM-1];
+    reg signed [DATA_WIDTH-1:0] sor1_temp_imag [0:MIC_NUM-1];
 
+    // G = a(f)h * a(f) + lambda * I register
+    // note1: g21 = g12 conjugate, so we only need store g11, g12, g22.
+    // note2: g11 and g22 only have real part, so we only need store real part of g11 and g22
     reg signed [DATA_WIDTH*2-1:0] g11_real_acc;
     reg signed [DATA_WIDTH*2-1:0] g12_real_acc;
     reg signed [DATA_WIDTH*2-1:0] g12_imag_acc;
-    reg signed [DATA_WIDTH*2-1:0] g21_real_acc;
     reg signed [DATA_WIDTH*2-1:0] g22_real_acc;
-
+    
+    // inverse G register
+    reg signed [DATA_WIDTH*3-1:0] inv_g11_real;
+    reg signed [DATA_WIDTH*3-1:0] inv_g12_real;
+    reg signed [DATA_WIDTH*3-1:0] inv_g12_imag;
+    reg signed [DATA_WIDTH*3-1:0] inv_g22_real;
+    
+    // square of g12 (avoid timing violation)
     wire signed [DATA_WIDTH*2-1:0] g12_real_acc_sqr;
     wire signed [DATA_WIDTH*2-1:0] g12_imag_acc_sqr;
 
     assign g12_real_acc_sqr = g12_real_acc * g12_real_acc;
     assign g12_imag_acc_sqr = g12_imag_acc * g12_imag_acc;
     
-    reg signed [DATA_WIDTH*2-1:0] det;
-    reg signed [DATA_WIDTH*2-1:0] inv_det;
+    // det
+    reg  signed [DATA_WIDTH*2-1:0]         det;
+    reg  signed [DIVIDEND_TDATA_WIDTH-1:0] inv_det_q;
+    reg  signed [DIVOUT_F_WIDTH-1:0]       inv_det_f;
+    wire signed [DIVOUT_TDATA_WIDTH-1:0]   inv_det;
+
+    // result elements (avoid timing violation)
+    reg signed [DATA_WIDTH*3-1:0] result_real_element0;
+    reg signed [DATA_WIDTH*3-1:0] result_real_element1;
+    reg signed [DATA_WIDTH*3-1:0] result_real_element2;
+    reg signed [DATA_WIDTH*3-1:0] result_imag_element0;
+    reg signed [DATA_WIDTH*3-1:0] result_imag_element1;
+
+
+    assign inv_det = ($signed(inv_det_q) <<< DIVOUT_F_WIDTH - 1) + $signed(inv_det_f);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -101,54 +139,132 @@ module inverse_top #(
 
     always @(*) begin
         case (state)
-            S_IDLE:        next_state = (start_delay[LATENCY]) ? S_RD : S_IDLE; 
-            S_RD:          next_state = (rd_cnt == PER_FREQ - 1) ? S_PLUS : S_UPDATE_ADDR;
-            S_UPDATE_ADDR: next_state = S_RD;
-            S_PLUS:        next_state = S_CALDET1;
-            S_CALDET1:     next_state = S_CALDET2;
-            S_CALDET2:     next_state = S_INVDET;
-            S_INVDET:      next_state = 
-            S_DONE: 
-            default: next_state = S_IDLE; 
+            S_IDLE:           next_state = (start_delay[LATENCY]) ? S_RD : S_IDLE; 
+            S_RD:             next_state = (rd_cnt == PER_FREQ - 1) ? S_PLUS : S_UPDATE_RD_ADDR;
+            S_UPDATE_RD_ADDR: next_state = S_RD;
+            S_PLUS:           next_state = S_CALDET1;
+            S_CALDET1:        next_state = S_CALDET2;
+            S_CALDET2:        next_state = S_INVDET;
+            S_INVDET:         next_state = S_SETDIV;
+            S_SETDIV:         next_state = S_WAITDIV;
+            S_WAITDIV:        next_state = (m_axis_dout_tvalid) ? S_CALINVG : S_WAITDIV;
+            S_CALINVG:        next_state = S_CALRESULT;
+            S_CALRESULT:      next_state = S_WR;
+            S_WR:             next_state = (wr_cnt == PER_FREQ - 1) ? S_DONE : S_UPDATE_WR_ADDR;
+            S_UPDATE_WR_ADDR: next_state = S_CALRESULT;
+            S_DONE:           next_state = S_IDLE;
+            default:          next_state = S_IDLE; 
         endcase
     end
 
+    integer i;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            // bram addr
             bram_rd_addr <= 0;
-            flag_rd_sor1 <= 1'b0;
-            sor0_cnt     <= 3'd0;
-            rd_cnt       <= 4'd0;
+            bram_wr_addr <= 0;
+
+            // sor0 and sor1 temp register
+            for (i = 0; i < MIC_NUM; i = i + 1) begin
+                sor0_temp_real[i] <= 0;
+                sor0_temp_imag[i] <= 0;
+                sor1_temp_real[i] <= 0;
+                sor1_temp_imag[i] <= 0;
+            end
+            flag_rd_sor1 <= 0;
+            result_row1  <= 0;
+
+            // G register
+            g11_real_acc <= 0;
+            g12_real_acc <= 0;
+            g12_imag_acc <= 0;
+            g22_real_acc <= 0;
+
+            // det register
+            det          <= 0;
+            inv_det_q    <= 0;
+            inv_det_f    <= 0;
+
+            // to divider
+            s_axis_dividend_tdata  <= 0;
+            s_axis_dividend_tvalid <= 0;
+            s_axis_divisor_tdata   <= 0;
+            s_axis_divisor_tvalid  <= 0;
+
+            // counter
+            sor_cnt         <= 3'd0;
+            rd_cnt          <= 4'd0;
+            wr_cnt          <= 4'd0;
+            freq_sample_cnt <= 9'd0;
+            
+            // result
+            result_real_element0 <= 0;
+            result_real_element1 <= 0;
+            result_real_element2 <= 0;
+            result_imag_element0 <= 0;
+            result_imag_element1 <= 0;
+            result_bram_wr_real  <= 0;
+            result_bram_wr_imag  <= 0;
+            bram_wr_we           <= 4'd0;
+            bram_wr_en           <= 1'b0;
+            all_freq_finish      <= 0;
+            done                 <= 0;
         end else begin
             case (state)
                 S_IDLE: begin
+                    all_freq_finish <= 0;
                     if (start_delay[LATENCY]) begin
-                        
+                        sor_cnt <= 0;
+                        rd_cnt  <= 0;
+                        for (i = 0; i < MIC_NUM; i = i + 1) begin
+                            sor0_temp_real[i] <= 0;
+                            sor0_temp_imag[i] <= 0;
+                            sor1_temp_real[i] <= 0;
+                            sor1_temp_imag[i] <= 0;
+                        end
+                        g11_real_acc <= 0;
+                        g12_real_acc <= 0;
+                        g12_imag_acc <= 0;
+                        g22_real_acc <= 0;
+                        inv_g11_real <= 0;
+                        inv_g12_real <= 0;
+                        inv_g12_imag <= 0;
+                        inv_g22_real <= 0;
+                        det          <= 0;
+                        inv_det      <= 0;
+                        inv_det_q    <= 0;
+                        inv_det_f    <= 0;
+                        done         <= 0;
+                        bram_wr_we   <= 4'd0;
+                        bram_wr_en   <= 1'b0;
                     end
                 end
                 S_RD: begin
                     rd_cnt <= (rd_cnt == PER_FREQ - 1) ? rd_cnt : rd_cnt + 1;
                     if (flag_rd_sor1) begin
-                        g22_real_acc <= g22_real_acc + af_bram_rd_real * af_bram_rd_real 
-                                                     + af_bram_rd_imag * af_bram_rd_imag;
-                        g12_real_acc <= g12_real_acc + sor0_temp_real[sor0_cnt] * af_bram_rd_real 
-                                                     + sor0_temp_imag[sor0_cnt] * af_bram_rd_imag;
-                        g12_imag_acc <= g12_imag_acc - sor0_temp_real[sor0_cnt] * af_bram_rd_imag 
-                                                     - sor0_temp_imag[sor0_cnt] * af_bram_rd_real;
+                        sor1_temp_real[sor_cnt] <= af_bram_rd_real;
+                        sor1_temp_imag[sor_cnt] <= af_bram_rd_imag;
+                        g22_real_acc <= g22_real_acc + $signed(af_bram_rd_real) * $signed(af_bram_rd_real) 
+                                                     + $signed(af_bram_rd_imag) * $signed(af_bram_rd_imag);
+                        g12_real_acc <= g12_real_acc + $signed(sor0_temp_real[sor_cnt]) * $signed(af_bram_rd_real) 
+                                                     + $signed(sor0_temp_imag[sor_cnt]) * $signed(af_bram_rd_imag);
+                        g12_imag_acc <= g12_imag_acc - $signed(sor0_temp_real[sor_cnt]) * $signed(af_bram_rd_imag) 
+                                                     - $signed(sor0_temp_imag[sor_cnt]) * $signed(af_bram_rd_real);
                     end else begin
-                        sor0_temp_real[sor0_cnt] <= af_bram_rd_real;
-                        sor0_temp_imag[sor0_cnt] <= af_bram_rd_imag;
-                        g11_real_acc             <= g11_real_acc + sor0_temp_real[sor0_cnt] * sor0_temp_real[sor0_cnt] 
-                                                                 + sor0_temp_imag[sor0_cnt] * sor0_temp_imag[sor0_cnt];
+                        sor0_temp_real[sor_cnt] <= af_bram_rd_real;
+                        sor0_temp_imag[sor_cnt] <= af_bram_rd_imag;
+                        g11_real_acc            <= g11_real_acc + $signed(sor0_temp_real[sor_cnt]) * $signed(sor0_temp_real[sor_cnt]) 
+                                                                + $signed(sor0_temp_imag[sor_cnt]) * $signed(sor0_temp_imag[sor_cnt]);
                     end
                 end
-                S_UPDATE_ADDR: begin
-                    sor0_cnt     <= (sor0_cnt == MIC_NUM - 1) ? 0 : sor0_cnt + 1;
-                    flag_rd_sor1 <= (sor0_cnt == MIC_NUM - 1) ? ~flag_rd_sor1 : flag_rd_sor1; 
+                S_UPDATE_RD_ADDR: begin
+                    sor_cnt      <= (sor_cnt == MIC_NUM - 1) ? 0 : sor_cnt + 1;
+                    flag_rd_sor1 <= (sor_cnt == MIC_NUM - 1) ? ~flag_rd_sor1 : flag_rd_sor1; 
                     bram_rd_addr <= bram_rd_addr + BRAM_RD_INCREASE;
                 end 
                 S_PLUS: begin
                     rd_cnt       <= 0;
+                    sor_cnt      <= 0;
                     g11_real_acc <= g11_real_acc + $signed(LAMBDA);
                     g22_real_acc <= g22_real_acc + $signed(LAMBDA);
                 end 
@@ -159,10 +275,59 @@ module inverse_top #(
                     det <= det - (g12_real_acc_sqr + g12_imag_acc_sqr);
                 end
                 S_INVDET: begin
-                    inv_det <= 1/det;
+                    s_axis_divisor_tdata  <= det;
+                    s_axis_dividend_tdata <= 1;
+                end
+                S_SETDIV: begin
+                    s_axis_divisor_tvalid  <= 1;
+                    s_axis_dividend_tvalid <= 1; 
+                end
+                S_WAITDIV: begin
+                    s_axis_divisor_tvalid  <= 0;
+                    s_axis_dividend_tvalid <= 0; 
+                    if (m_axis_dout_tvalid) begin
+                        inv_det_q <= m_axis_dout_tdata[DIVOUT_TDATA_WIDTH-1:DIVOUT_F_WIDTH];
+                        inv_det_f <= m_axis_dout_tdata[DIVOUT_F_WIDTH-1:0];
+                    end
+                end
+                S_CALINVG: begin
+                    inv_g11_real <=  g22_real_acc * inv_det;
+                    inv_g12_real <= -g12_real_acc * inv_det;
+                    inv_g12_imag <= -g12_real_acc * inv_det;
+                    inv_g22_real <=  g11_real_acc * inv_det;
+                end
+                S_CALRESULT: begin
+                    if (result_row1) begin
+                        result_real_element0 <=  inv_g12_real * sor0_temp_real[sor_cnt];
+                        result_real_element1 <= -inv_g12_imag * sor0_temp_imag[sor_cnt];
+                        result_real_element2 <=  inv_g22_real * sor1_temp_real[sor_cnt];
+                        result_imag_element0 <=  inv_g12_real * sor1_temp_imag[sor_cnt];
+                        result_imag_element1 <= -inv_g12_imag * sor1_temp_real[sor_cnt];
+                    end else begin
+                        result_real_element0 <=  inv_g11_real * sor0_temp_real[sor_cnt];
+                        result_real_element1 <=  inv_g12_real * sor1_temp_real[sor_cnt];
+                        result_real_element2 <=  inv_g12_imag * sor1_temp_imag[sor_cnt];
+                        result_imag_element0 <=  inv_g12_real * sor1_temp_imag[sor_cnt];
+                        result_imag_element1 <=  inv_g12_imag * sor1_temp_real[sor_cnt]; 
+                    end
+                end
+                S_WR: begin
+                    wr_cnt <= (wr_cnt == PER_FREQ - 1) ? wr_cnt : wr_cnt + 1;
+                    bram_wr_we <= 4'b1111;
+                    bram_wr_en <= 1'b1;
+                    result_bram_wr_real <= result_real_element0 + result_real_element1 + result_real_element2;
+                    result_bram_wr_imag <= result_imag_element0 + result_imag_element1;
+                end
+                S_UPDATE_WR_ADDR: begin
+                    sor_cnt      <= (sor_cnt == MIC_NUM - 1) ? 0 : sor_cnt + 1;
+                    result_row1  <= (sor_cnt == MIC_NUM - 1) ? ~result_row1 : result_row1;
+                    bram_wr_addr <= bram_wr_addr + BRAM_WR_INCREASE;
                 end
                 S_DONE: begin
-                    done <= 1;
+                    freq_sample_cnt <= (freq_sample_cnt == FREQ_NUM - 1) ? 0 : freq_sample_cnt + 1;
+                    all_freq_finish <= (freq_sample_cnt == FREQ_NUM - 1) ? 1 : 0;
+                    wr_cnt <= 0;
+                    done   <= 1;
                 end
                 default: begin
                     
