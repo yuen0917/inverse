@@ -240,6 +240,15 @@ module inverse_top #(
                         done         <= 0;
                         bram_wr_we   <= 4'd0;
                         bram_wr_en   <= 1'b0;
+                        result_real_element0 <= 0;
+                        result_real_element1 <= 0;
+                        result_real_element2 <= 0;
+                        result_imag_element0 <= 0;
+                        result_imag_element1 <= 0;
+                        result_imag_element2 <= 0;
+                        result_bram_wr_real  <= 0;
+                        result_bram_wr_imag  <= 0;
+                        all_freq_finish      <= 0;
                     end
                 end
                 S_RD: begin
@@ -247,12 +256,12 @@ module inverse_top #(
                     if (flag_rd_sor1) begin
                         sor1_temp_real[sor_cnt] <= af_bram_rd_real;
                         sor1_temp_imag[sor_cnt] <= af_bram_rd_imag;
-                        g22_real_acc <= g22_real_acc + $signed(af_bram_rd_real) * $signed(af_bram_rd_real)
-                                                     + $signed(af_bram_rd_imag) * $signed(af_bram_rd_imag);
-                        g12_real_acc <= g12_real_acc + $signed(sor0_temp_real[sor_cnt]) * $signed(af_bram_rd_real)
-                                                     + $signed(sor0_temp_imag[sor_cnt]) * $signed(af_bram_rd_imag);
-                        g12_imag_acc <= g12_imag_acc + $signed(sor0_temp_real[sor_cnt]) * $signed(af_bram_rd_imag)
-                                                     - $signed(sor0_temp_imag[sor_cnt]) * $signed(af_bram_rd_real);
+                        g22_real_acc            <= g22_real_acc + $signed(af_bram_rd_real) * $signed(af_bram_rd_real)
+                                                                + $signed(af_bram_rd_imag) * $signed(af_bram_rd_imag);
+                        g12_real_acc            <= g12_real_acc + $signed(sor0_temp_real[sor_cnt]) * $signed(af_bram_rd_real)
+                                                                + $signed(sor0_temp_imag[sor_cnt]) * $signed(af_bram_rd_imag);
+                        g12_imag_acc            <= g12_imag_acc + $signed(sor0_temp_real[sor_cnt]) * $signed(af_bram_rd_imag)
+                                                                - $signed(sor0_temp_imag[sor_cnt]) * $signed(af_bram_rd_real);
                     end else begin
                         sor0_temp_real[sor_cnt] <= af_bram_rd_real;
                         sor0_temp_imag[sor_cnt] <= af_bram_rd_imag;
