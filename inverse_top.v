@@ -4,6 +4,8 @@ module inverse_top #(
     parameter LATENCY              = 2,
     parameter BRAM_RD_ADDR_WIDTH   = 10,
     parameter BRAM_WR_ADDR_WIDTH   = 10,
+    parameter BRAM_RD_ADDR_BASE    = 0,
+    parameter BRAM_WR_ADDR_BASE    = 0,
     parameter BRAM_RD_INCREASE     = 4,
     parameter BRAM_WR_INCREASE     = 4,
     parameter MIC_NUM              = 8,
@@ -11,9 +13,9 @@ module inverse_top #(
     parameter FREQ_NUM             = 257,
     parameter DIVOUT_TDATA_WIDTH   = 48,
     parameter DIVOUT_F_WIDTH       = 16,
-    parameter DIVISOR_TDATA_WIDTH  = 32, 
+    parameter DIVISOR_TDATA_WIDTH  = 32,
     parameter DIVIDEND_TDATA_WIDTH = 32,
-    parameter LAMBDA               = 16'sh0000A4 // signed 164, s10.14
+    parameter LAMBDA               = 16'sh00A4 // signed 164, s10.14
 )(
     input                                        clk,
     input                                        rst_n,
@@ -99,20 +101,20 @@ module inverse_top #(
     reg signed [DATA_WIDTH*2-1:0] g12_real_acc;
     reg signed [DATA_WIDTH*2-1:0] g12_imag_acc;
     reg signed [DATA_WIDTH*2-1:0] g22_real_acc;
-    
+
     // inverse G register
     reg signed [DATA_WIDTH*3-1:0] inv_g11_real;
     reg signed [DATA_WIDTH*3-1:0] inv_g12_real;
     reg signed [DATA_WIDTH*3-1:0] inv_g12_imag;
     reg signed [DATA_WIDTH*3-1:0] inv_g22_real;
-    
+
     // square of g12 (avoid timing violation)
     wire signed [DATA_WIDTH*2-1:0] g12_real_acc_sqr;
     wire signed [DATA_WIDTH*2-1:0] g12_imag_acc_sqr;
 
     assign g12_real_acc_sqr = g12_real_acc * g12_real_acc;
     assign g12_imag_acc_sqr = g12_imag_acc * g12_imag_acc;
-    
+
     // det
     reg  signed [DATA_WIDTH*2-1:0]         det;
     reg  signed [DIVIDEND_TDATA_WIDTH-1:0] inv_det_q;
@@ -125,6 +127,7 @@ module inverse_top #(
     reg signed [DATA_WIDTH*3-1:0] result_real_element2;
     reg signed [DATA_WIDTH*3-1:0] result_imag_element0;
     reg signed [DATA_WIDTH*3-1:0] result_imag_element1;
+    reg signed [DATA_WIDTH*3-1:0] result_imag_element2;
 
 
     assign inv_det = ($signed(inv_det_q) <<< DIVOUT_F_WIDTH - 1) + $signed(inv_det_f);
@@ -139,7 +142,7 @@ module inverse_top #(
 
     always @(*) begin
         case (state)
-            S_IDLE:           next_state = (start_delay[LATENCY]) ? S_RD : S_IDLE; 
+            S_IDLE:           next_state = (start_delay[LATENCY]) ? S_RD : S_IDLE;
             S_RD:             next_state = (rd_cnt == PER_FREQ - 1) ? S_PLUS : S_UPDATE_RD_ADDR;
             S_UPDATE_RD_ADDR: next_state = S_RD;
             S_PLUS:           next_state = S_CALDET1;
@@ -153,7 +156,7 @@ module inverse_top #(
             S_WR:             next_state = (wr_cnt == PER_FREQ - 1) ? S_DONE : S_UPDATE_WR_ADDR;
             S_UPDATE_WR_ADDR: next_state = S_CALRESULT;
             S_DONE:           next_state = S_IDLE;
-            default:          next_state = S_IDLE; 
+            default:          next_state = S_IDLE;
         endcase
     end
 
@@ -161,8 +164,8 @@ module inverse_top #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             // bram addr
-            bram_rd_addr <= 0;
-            bram_wr_addr <= 0;
+            bram_rd_addr <= BRAM_RD_ADDR_BASE;
+            bram_wr_addr <= BRAM_WR_ADDR_BASE;
 
             // sor0 and sor1 temp register
             for (i = 0; i < MIC_NUM; i = i + 1) begin
@@ -196,13 +199,14 @@ module inverse_top #(
             rd_cnt          <= 4'd0;
             wr_cnt          <= 4'd0;
             freq_sample_cnt <= 9'd0;
-            
+
             // result
             result_real_element0 <= 0;
             result_real_element1 <= 0;
             result_real_element2 <= 0;
             result_imag_element0 <= 0;
             result_imag_element1 <= 0;
+            result_imag_element2 <= 0;
             result_bram_wr_real  <= 0;
             result_bram_wr_imag  <= 0;
             bram_wr_we           <= 4'd0;
@@ -231,7 +235,6 @@ module inverse_top #(
                         inv_g12_imag <= 0;
                         inv_g22_real <= 0;
                         det          <= 0;
-                        inv_det      <= 0;
                         inv_det_q    <= 0;
                         inv_det_f    <= 0;
                         done         <= 0;
@@ -244,33 +247,33 @@ module inverse_top #(
                     if (flag_rd_sor1) begin
                         sor1_temp_real[sor_cnt] <= af_bram_rd_real;
                         sor1_temp_imag[sor_cnt] <= af_bram_rd_imag;
-                        g22_real_acc <= g22_real_acc + $signed(af_bram_rd_real) * $signed(af_bram_rd_real) 
+                        g22_real_acc <= g22_real_acc + $signed(af_bram_rd_real) * $signed(af_bram_rd_real)
                                                      + $signed(af_bram_rd_imag) * $signed(af_bram_rd_imag);
-                        g12_real_acc <= g12_real_acc + $signed(sor0_temp_real[sor_cnt]) * $signed(af_bram_rd_real) 
+                        g12_real_acc <= g12_real_acc + $signed(sor0_temp_real[sor_cnt]) * $signed(af_bram_rd_real)
                                                      + $signed(sor0_temp_imag[sor_cnt]) * $signed(af_bram_rd_imag);
-                        g12_imag_acc <= g12_imag_acc - $signed(sor0_temp_real[sor_cnt]) * $signed(af_bram_rd_imag) 
+                        g12_imag_acc <= g12_imag_acc + $signed(sor0_temp_real[sor_cnt]) * $signed(af_bram_rd_imag)
                                                      - $signed(sor0_temp_imag[sor_cnt]) * $signed(af_bram_rd_real);
                     end else begin
                         sor0_temp_real[sor_cnt] <= af_bram_rd_real;
                         sor0_temp_imag[sor_cnt] <= af_bram_rd_imag;
-                        g11_real_acc            <= g11_real_acc + $signed(sor0_temp_real[sor_cnt]) * $signed(sor0_temp_real[sor_cnt]) 
-                                                                + $signed(sor0_temp_imag[sor_cnt]) * $signed(sor0_temp_imag[sor_cnt]);
+                        g11_real_acc            <= g11_real_acc + $signed(af_bram_rd_real) * $signed(af_bram_rd_real)
+                                                                + $signed(af_bram_rd_imag) * $signed(af_bram_rd_imag);
                     end
                 end
                 S_UPDATE_RD_ADDR: begin
                     sor_cnt      <= (sor_cnt == MIC_NUM - 1) ? 0 : sor_cnt + 1;
-                    flag_rd_sor1 <= (sor_cnt == MIC_NUM - 1) ? ~flag_rd_sor1 : flag_rd_sor1; 
+                    flag_rd_sor1 <= (sor_cnt == MIC_NUM - 1) ? ~flag_rd_sor1 : flag_rd_sor1;
                     bram_rd_addr <= bram_rd_addr + BRAM_RD_INCREASE;
-                end 
+                end
                 S_PLUS: begin
                     rd_cnt       <= 0;
                     sor_cnt      <= 0;
                     g11_real_acc <= g11_real_acc + $signed(LAMBDA);
                     g22_real_acc <= g22_real_acc + $signed(LAMBDA);
-                end 
+                end
                 S_CALDET1: begin
                     det <= g11_real_acc * g22_real_acc;
-                end 
+                end
                 S_CALDET2: begin
                     det <= det - (g12_real_acc_sqr + g12_imag_acc_sqr);
                 end
@@ -280,11 +283,11 @@ module inverse_top #(
                 end
                 S_SETDIV: begin
                     s_axis_divisor_tvalid  <= 1;
-                    s_axis_dividend_tvalid <= 1; 
+                    s_axis_dividend_tvalid <= 1;
                 end
                 S_WAITDIV: begin
                     s_axis_divisor_tvalid  <= 0;
-                    s_axis_dividend_tvalid <= 0; 
+                    s_axis_dividend_tvalid <= 0;
                     if (m_axis_dout_tvalid) begin
                         inv_det_q <= m_axis_dout_tdata[DIVOUT_TDATA_WIDTH-1:DIVOUT_F_WIDTH];
                         inv_det_f <= m_axis_dout_tdata[DIVOUT_F_WIDTH-1:0];
@@ -301,14 +304,16 @@ module inverse_top #(
                         result_real_element0 <=  inv_g12_real * sor0_temp_real[sor_cnt];
                         result_real_element1 <= -inv_g12_imag * sor0_temp_imag[sor_cnt];
                         result_real_element2 <=  inv_g22_real * sor1_temp_real[sor_cnt];
-                        result_imag_element0 <=  inv_g12_real * sor1_temp_imag[sor_cnt];
-                        result_imag_element1 <= -inv_g12_imag * sor1_temp_real[sor_cnt];
+                        result_imag_element0 <= -inv_g12_real * sor0_temp_imag[sor_cnt];
+                        result_imag_element1 <= -inv_g12_imag * sor0_temp_real[sor_cnt];
+                        result_imag_element2 <= -inv_g22_real * sor1_temp_imag[sor_cnt];
                     end else begin
                         result_real_element0 <=  inv_g11_real * sor0_temp_real[sor_cnt];
                         result_real_element1 <=  inv_g12_real * sor1_temp_real[sor_cnt];
                         result_real_element2 <=  inv_g12_imag * sor1_temp_imag[sor_cnt];
-                        result_imag_element0 <=  inv_g12_real * sor1_temp_imag[sor_cnt];
-                        result_imag_element1 <=  inv_g12_imag * sor1_temp_real[sor_cnt]; 
+                        result_imag_element0 <= -inv_g11_real * sor0_temp_imag[sor_cnt];
+                        result_imag_element1 <= -inv_g12_real * sor1_temp_imag[sor_cnt];
+                        result_imag_element2 <=  inv_g12_imag * sor1_temp_real[sor_cnt];
                     end
                 end
                 S_WR: begin
@@ -330,7 +335,7 @@ module inverse_top #(
                     done   <= 1;
                 end
                 default: begin
-                    
+
                 end
             endcase
         end
