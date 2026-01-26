@@ -1,21 +1,22 @@
 `timescale 1ns / 1ps
 module inverse_top #(
-    parameter DATA_WIDTH           = 16,
-    parameter LATENCY              = 2,
-    parameter BRAM_RD_ADDR_WIDTH   = 10,
-    parameter BRAM_WR_ADDR_WIDTH   = 10,
-    parameter BRAM_RD_ADDR_BASE    = 0,
-    parameter BRAM_WR_ADDR_BASE    = 0,
-    parameter BRAM_RD_INCREASE     = 4,
-    parameter BRAM_WR_INCREASE     = 4,
     parameter MIC_NUM              = 8,
     parameter SOR_NUM              = 2,
     parameter FREQ_NUM             = 257,
+    parameter DATA_WIDTH           = 16,
+    parameter LATENCY              = 2,
+    parameter BRAM_RD_ADDR_WIDTH   = 32,
+    parameter BRAM_WR_ADDR_WIDTH   = 32,
+    parameter BRAM_RD_ADDR_BASE    = 0,
+    parameter BRAM_WR_ADDR_BASE    = 0,
+    parameter BRAM_RD_INCREASE     = 2, // 16 / 8 = 2
+    parameter BRAM_WR_INCREASE     = 6, // 48 / 8 = 6
+    parameter BRAM_WR_WE_WIDTH     = 6,
     parameter DIVOUT_TDATA_WIDTH   = 48,
     parameter DIVOUT_F_WIDTH       = 16,
     parameter DIVISOR_TDATA_WIDTH  = 32,
     parameter DIVIDEND_TDATA_WIDTH = 32,
-    parameter LAMBDA               = 16'sh00A4 // signed 164, s10.14
+    parameter LAMBDA               = 16'sh00A4
 )(
     input                                        clk,
     input                                        rst_n,
@@ -32,8 +33,8 @@ module inverse_top #(
     output reg signed [DATA_WIDTH*3-1:0]         result_bram_wr_real,
     output reg signed [DATA_WIDTH*3-1:0]         result_bram_wr_imag,
     output reg        [BRAM_WR_ADDR_WIDTH-1:0]   bram_wr_addr,
-    output reg        [3:0]                      bram_wr_we,
-    output reg                                   bram_wr_en,
+    output            [BRAM_WR_WE_WIDTH-1:0]     bram_wr_we,
+    output                                       bram_wr_en,
 
     // from divider
     input      signed [DIVOUT_TDATA_WIDTH-1:0]   m_axis_dout_tdata,
@@ -89,6 +90,9 @@ module inverse_top #(
     reg       result_row1;
     reg [8:0] freq_sample_cnt;
 
+    assign bram_wr_we = (state == S_WR) ? {BRAM_WR_WE_WIDTH{1'b1}} : {BRAM_WR_WE_WIDTH{1'b0}};
+    assign bram_wr_en = (state == S_WR);
+
     reg signed [DATA_WIDTH-1:0] sor0_temp_real [0:MIC_NUM-1];
     reg signed [DATA_WIDTH-1:0] sor0_temp_imag [0:MIC_NUM-1];
     reg signed [DATA_WIDTH-1:0] sor1_temp_real [0:MIC_NUM-1];
@@ -97,10 +101,10 @@ module inverse_top #(
     // G = a(f)h * a(f) + lambda * I register
     // note1: g21 = g12 conjugate, so we only need store g11, g12, g22.
     // note2: g11 and g22 only have real part, so we only need store real part of g11 and g22
-    reg signed [DATA_WIDTH*2-1:0] g11_real_acc;
-    reg signed [DATA_WIDTH*2-1:0] g12_real_acc;
-    reg signed [DATA_WIDTH*2-1:0] g12_imag_acc;
-    reg signed [DATA_WIDTH*2-1:0] g22_real_acc;
+    reg signed [DATA_WIDTH*3-1:0] g11_real_acc;
+    reg signed [DATA_WIDTH*3-1:0] g12_real_acc;
+    reg signed [DATA_WIDTH*3-1:0] g12_imag_acc;
+    reg signed [DATA_WIDTH*3-1:0] g22_real_acc;
 
     // inverse G register
     reg signed [DATA_WIDTH*3-1:0] inv_g11_real;
@@ -130,7 +134,7 @@ module inverse_top #(
     reg signed [DATA_WIDTH*3-1:0] result_imag_element2;
 
 
-    assign inv_det = ($signed(inv_det_q) <<< DIVOUT_F_WIDTH - 1) + $signed(inv_det_f);
+    assign inv_det = ($signed(inv_det_q) <<< (DIVOUT_F_WIDTH - 1)) + $signed(inv_det_f);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -209,8 +213,6 @@ module inverse_top #(
             result_imag_element2 <= 0;
             result_bram_wr_real  <= 0;
             result_bram_wr_imag  <= 0;
-            bram_wr_we           <= 4'd0;
-            bram_wr_en           <= 1'b0;
             all_freq_finish      <= 0;
             done                 <= 0;
         end else begin
@@ -218,8 +220,8 @@ module inverse_top #(
                 S_IDLE: begin
                     all_freq_finish <= 0;
                     if (start_delay[LATENCY]) begin
-                        sor_cnt <= 0;
-                        rd_cnt  <= 0;
+                        sor_cnt    <= 0;
+                        rd_cnt     <= 0;
                         for (i = 0; i < MIC_NUM; i = i + 1) begin
                             sor0_temp_real[i] <= 0;
                             sor0_temp_imag[i] <= 0;
@@ -238,8 +240,6 @@ module inverse_top #(
                         inv_det_q    <= 0;
                         inv_det_f    <= 0;
                         done         <= 0;
-                        bram_wr_we   <= 4'd0;
-                        bram_wr_en   <= 1'b0;
                         result_real_element0 <= 0;
                         result_real_element1 <= 0;
                         result_real_element2 <= 0;
@@ -248,7 +248,6 @@ module inverse_top #(
                         result_imag_element2 <= 0;
                         result_bram_wr_real  <= 0;
                         result_bram_wr_imag  <= 0;
-                        all_freq_finish      <= 0;
                     end
                 end
                 S_RD: begin
@@ -305,7 +304,7 @@ module inverse_top #(
                 S_CALINVG: begin
                     inv_g11_real <=  g22_real_acc * inv_det;
                     inv_g12_real <= -g12_real_acc * inv_det;
-                    inv_g12_imag <= -g12_real_acc * inv_det;
+                    inv_g12_imag <= -g12_imag_acc * inv_det;
                     inv_g22_real <=  g11_real_acc * inv_det;
                 end
                 S_CALRESULT: begin
@@ -327,10 +326,8 @@ module inverse_top #(
                 end
                 S_WR: begin
                     wr_cnt <= (wr_cnt == PER_FREQ - 1) ? wr_cnt : wr_cnt + 1;
-                    bram_wr_we <= 4'b1111;
-                    bram_wr_en <= 1'b1;
                     result_bram_wr_real <= result_real_element0 + result_real_element1 + result_real_element2;
-                    result_bram_wr_imag <= result_imag_element0 + result_imag_element1;
+                    result_bram_wr_imag <= result_imag_element0 + result_imag_element1 + result_imag_element2;
                 end
                 S_UPDATE_WR_ADDR: begin
                     sor_cnt      <= (sor_cnt == MIC_NUM - 1) ? 0 : sor_cnt + 1;
@@ -340,8 +337,8 @@ module inverse_top #(
                 S_DONE: begin
                     freq_sample_cnt <= (freq_sample_cnt == FREQ_NUM - 1) ? 0 : freq_sample_cnt + 1;
                     all_freq_finish <= (freq_sample_cnt == FREQ_NUM - 1) ? 1 : 0;
-                    wr_cnt <= 0;
-                    done   <= 1;
+                    wr_cnt          <= 0;
+                    done            <= 1;
                 end
                 default: begin
 
