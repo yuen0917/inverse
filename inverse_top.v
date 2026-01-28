@@ -12,11 +12,11 @@ module inverse_top #(
     parameter BRAM_RD_INCREASE     = 2, // 16 / 8 = 2
     parameter BRAM_WR_INCREASE     = 6, // 48 / 8 = 6
     parameter BRAM_WR_WE_WIDTH     = 6,
-    parameter DIVOUT_TDATA_WIDTH   = 48,
-    parameter DIVOUT_F_WIDTH       = 16,
+    parameter DIVOUT_TDATA_WIDTH   = 64,
+    parameter DIVOUT_F_WIDTH       = 32,
     parameter DIVISOR_TDATA_WIDTH  = 32,
     parameter DIVIDEND_TDATA_WIDTH = 32,
-    parameter LAMBDA               = 16'sh00A4
+    parameter LAMBDA               = 32'sh000000A4
 )(
     input                                        clk,
     input                                        rst_n,
@@ -30,8 +30,8 @@ module inverse_top #(
     output reg        [BRAM_RD_ADDR_WIDTH-1:0]   bram_rd_addr,
 
     // write bram data
-    output reg signed [DATA_WIDTH*3-1:0]         result_bram_wr_real,
-    output reg signed [DATA_WIDTH*3-1:0]         result_bram_wr_imag,
+    output reg signed [DATA_WIDTH*4-1:0]         result_bram_wr_real,
+    output reg signed [DATA_WIDTH*4-1:0]         result_bram_wr_imag,
     output reg        [BRAM_WR_ADDR_WIDTH-1:0]   bram_wr_addr,
     output            [BRAM_WR_WE_WIDTH-1:0]     bram_wr_we,
     output                                       bram_wr_en,
@@ -101,16 +101,10 @@ module inverse_top #(
     // G = a(f)h * a(f) + lambda * I register
     // note1: g21 = g12 conjugate, so we only need store g11, g12, g22.
     // note2: g11 and g22 only have real part, so we only need store real part of g11 and g22
-    reg signed [DATA_WIDTH*3-1:0] g11_real_acc;
-    reg signed [DATA_WIDTH*3-1:0] g12_real_acc;
-    reg signed [DATA_WIDTH*3-1:0] g12_imag_acc;
-    reg signed [DATA_WIDTH*3-1:0] g22_real_acc;
-
-    // inverse G register
-    reg signed [DATA_WIDTH*3-1:0] inv_g11_real;
-    reg signed [DATA_WIDTH*3-1:0] inv_g12_real;
-    reg signed [DATA_WIDTH*3-1:0] inv_g12_imag;
-    reg signed [DATA_WIDTH*3-1:0] inv_g22_real;
+    reg signed [DATA_WIDTH*2-1:0] g11_real_acc;
+    reg signed [DATA_WIDTH*2-1:0] g12_real_acc;
+    reg signed [DATA_WIDTH*2-1:0] g12_imag_acc;
+    reg signed [DATA_WIDTH*2-1:0] g22_real_acc;
 
     // square of g12 (avoid timing violation)
     wire signed [DATA_WIDTH*2-1:0] g12_real_acc_sqr;
@@ -124,6 +118,12 @@ module inverse_top #(
     reg  signed [DIVIDEND_TDATA_WIDTH-1:0] inv_det_q;
     reg  signed [DIVOUT_F_WIDTH-1:0]       inv_det_f;
     wire signed [DIVOUT_TDATA_WIDTH-1:0]   inv_det;
+
+    // inverse G register
+    reg signed [DATA_WIDTH*3-1:0] inv_g11_real;
+    reg signed [DATA_WIDTH*3-1:0] inv_g12_real;
+    reg signed [DATA_WIDTH*3-1:0] inv_g12_imag;
+    reg signed [DATA_WIDTH*3-1:0] inv_g22_real;
 
     // result elements (avoid timing violation)
     reg signed [DATA_WIDTH*3-1:0] result_real_element0;
@@ -218,7 +218,6 @@ module inverse_top #(
         end else begin
             case (state)
                 S_IDLE: begin
-                    all_freq_finish <= 0;
                     if (start_delay[LATENCY]) begin
                         sor_cnt    <= 0;
                         rd_cnt     <= 0;
@@ -240,6 +239,7 @@ module inverse_top #(
                         inv_det_q    <= 0;
                         inv_det_f    <= 0;
                         done         <= 0;
+                        all_freq_finish      <= 0;
                         result_real_element0 <= 0;
                         result_real_element1 <= 0;
                         result_real_element2 <= 0;
@@ -248,6 +248,8 @@ module inverse_top #(
                         result_imag_element2 <= 0;
                         result_bram_wr_real  <= 0;
                         result_bram_wr_imag  <= 0;
+                        flag_rd_sor1         <= 0;
+                        result_row1          <= 0;
                     end
                 end
                 S_RD: begin
@@ -274,6 +276,7 @@ module inverse_top #(
                     bram_rd_addr <= bram_rd_addr + BRAM_RD_INCREASE;
                 end
                 S_PLUS: begin
+                    flag_rd_sor1 <= 0;
                     rd_cnt       <= 0;
                     sor_cnt      <= 0;
                     g11_real_acc <= g11_real_acc + $signed(LAMBDA);
@@ -325,7 +328,7 @@ module inverse_top #(
                     end
                 end
                 S_WR: begin
-                    wr_cnt <= (wr_cnt == PER_FREQ - 1) ? wr_cnt : wr_cnt + 1;
+                    wr_cnt              <= (wr_cnt == PER_FREQ - 1) ? wr_cnt : wr_cnt + 1;
                     result_bram_wr_real <= result_real_element0 + result_real_element1 + result_real_element2;
                     result_bram_wr_imag <= result_imag_element0 + result_imag_element1 + result_imag_element2;
                 end
@@ -335,10 +338,13 @@ module inverse_top #(
                     bram_wr_addr <= bram_wr_addr + BRAM_WR_INCREASE;
                 end
                 S_DONE: begin
+                    result_row1     <= 0;
                     freq_sample_cnt <= (freq_sample_cnt == FREQ_NUM - 1) ? 0 : freq_sample_cnt + 1;
                     all_freq_finish <= (freq_sample_cnt == FREQ_NUM - 1) ? 1 : 0;
+                    sor_cnt         <= 0;
                     wr_cnt          <= 0;
                     done            <= 1;
+                    bram_wr_addr    <= bram_wr_addr + BRAM_WR_INCREASE; // for next bram write start
                 end
                 default: begin
 

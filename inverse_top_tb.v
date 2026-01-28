@@ -11,7 +11,6 @@ module inverse_top_tb ();
     localparam FREQ_NUM           = 257;
     localparam PER_FREQ           = MIC_NUM * SOR_NUM;  // 16
     localparam TOTAL_NUM          = MIC_NUM * SOR_NUM * FREQ_NUM;  // 4112
-    localparam LATENCY             = 2;
 
     localparam PERIOD = 10;
 
@@ -36,10 +35,8 @@ module inverse_top_tb ();
     // Simulated BRAM for write data
     reg signed [DATA_WIDTH*3-1:0] bram_wr_mem_real [0:TOTAL_NUM-1];
     reg signed [DATA_WIDTH*3-1:0] bram_wr_mem_imag [0:TOTAL_NUM-1];
-    reg                            bram_wr_valid   [0:TOTAL_NUM-1];
+    reg                           bram_wr_valid    [0:TOTAL_NUM-1];
 
-    // BRAM read address delay pipeline (simulate BRAM latency)
-    reg [BRAM_RD_ADDR_WIDTH-1:0] bram_rd_addr_delay [0:LATENCY-1];
     integer i;
 
     design_2 u_design_2 (
@@ -79,36 +76,18 @@ module inverse_top_tb ();
         end
     end
 
-    // Simulate BRAM read with latency
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            for (i = 0; i < LATENCY; i = i + 1) begin
-                bram_rd_addr_delay[i] <= 0;
-            end
-            af_bram_rd_real <= 0;
-            af_bram_rd_imag <= 0;
+    // Simulate BRAM read without extra latency
+    always @(*) begin
+        // Address is in bytes, convert to word index: addr / increment
+        // BRAM_RD_ADDR_BASE is 0, BRAM_RD_INCREASE is 2
+        if ((bram_rd_addr / BRAM_RD_INCREASE) < TOTAL_NUM) begin
+            af_bram_rd_real = bram_rd_mem_real[bram_rd_addr / BRAM_RD_INCREASE];
+            af_bram_rd_imag = bram_rd_mem_imag[bram_rd_addr / BRAM_RD_INCREASE];
         end else begin
-            // Pipeline the address
-            bram_rd_addr_delay[0] <= bram_rd_addr;
-            for (i = 1; i < LATENCY; i = i + 1) begin
-                bram_rd_addr_delay[i] <= bram_rd_addr_delay[i-1];
-            end
-            
-            // Read data after latency (convert address to index)
-            // Address is in bytes, convert to word index: addr / increment
-            // BRAM_RD_ADDR_BASE is 0, BRAM_RD_INCREASE is 2
-            // Each data is 16 bits = 2 bytes, so divide by 2 to get index
-            if (bram_rd_addr_delay[LATENCY-1] >= 0 && 
-                (bram_rd_addr_delay[LATENCY-1] / BRAM_RD_INCREASE) < TOTAL_NUM) begin
-                af_bram_rd_real <= bram_rd_mem_real[bram_rd_addr_delay[LATENCY-1] / BRAM_RD_INCREASE];
-                af_bram_rd_imag <= bram_rd_mem_imag[bram_rd_addr_delay[LATENCY-1] / BRAM_RD_INCREASE];
-            end else begin
-                af_bram_rd_real <= 0;
-                af_bram_rd_imag <= 0;
-            end
+            af_bram_rd_real = 0;
+            af_bram_rd_imag = 0;
         end
     end
-
     // Simulate BRAM write
     reg [BRAM_WR_ADDR_WIDTH-1:0] wr_addr_index;
     always @(*) begin
@@ -145,22 +124,23 @@ module inverse_top_tb ();
         // Reset
         #(PERIOD * 10);
         rst_n = 1;
-        #(PERIOD * 5);
+        #(PERIOD * 30);
 
         // Run two rounds; each round sweeps all FREQ_NUM freqs.
         // For each freq, send one start pulse (process PER_FREQ = 16 samples).
-        for (round = 0; round < 2; round = round + 1) begin
+        for (round = 0; round < 1; round = round + 1) begin
             $display("========================================");
             $display("Round %0d: start running all %0d freqs", round, FREQ_NUM);
             $display("========================================");
 
             for (f = 0; f < FREQ_NUM; f = f + 1) begin
                 // start pulse for this frequency
-                @(negedge clk);
+                @(posedge clk);
                 start = 1'b1;
-                @(negedge clk);
+                @(posedge clk);
                 start = 1'b0;
                 
+                wait (done == 1'b0);
                 wait (done == 1'b1);
                 
                 // Optional: display progress every 10 freqs
