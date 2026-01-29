@@ -34,11 +34,11 @@ DET_WIDTH = DATA_WIDTH * 2          # det width (32), maps to DIVISOR_TDATA_WIDT
 
 # Divider configuration (mirror inverse_top.v)
 DIVOUT_TDATA_WIDTH = 64
-DIVOUT_F_WIDTH = 32                 # 32 fractional bits after divider
+DIVOUT_F_WIDTH = 31                 # 32 fractional bits after divider
 DIVIDEND_TDATA_WIDTH = 32
 DIVISOR_TDATA_WIDTH = 32
 
-LAMBDA = int("0000000000A4", 16)    # same numeric value as 48'h0000000000A4
+LAMBDA = int("00000000", 16)    # same numeric value as 32'h00000000
 
 PER_FREQ = MIC_NUM * SOR_NUM
 TOTAL_NUM = MIC_NUM * SOR_NUM * FREQ_NUM
@@ -195,12 +195,13 @@ def compute_inv_g(g11: int, g12_r: int, g12_i: int, g22: int) -> tuple[int, int,
     All arguments are ACC_WIDTH‑bit signed.
     """
     # det = g11 * g22  (stored in 32‑bit det register in hardware)
-    det = mul_tc(g11, g22, DET_WIDTH)
+    det_mul = mul_tc(g11, g22, DET_WIDTH)
 
     # subtract |g12|^2
     g12_r_sqr = mul_tc(g12_r, g12_r, DET_WIDTH)
     g12_i_sqr = mul_tc(g12_i, g12_i, DET_WIDTH)
-    det = sub_tc(det, add_tc(g12_r_sqr, g12_i_sqr, DET_WIDTH), DET_WIDTH)
+    det_sub = add_tc(g12_r_sqr, g12_i_sqr, DET_WIDTH)
+    det = sub_tc(det_mul, det_sub, DET_WIDTH)
 
     # inv_det ≈ 1 / det in fixed‑point, with DIVOUT_F_WIDTH fractional bits
     inv_det_fp = fixed_div_1_over_det(det)  # 64‑bit fixed‑point (Q32.32‑like)
@@ -243,6 +244,14 @@ def compute_outputs_for_freq(freq: int) -> dict:
         g11_after, g12_r, g12_i, g22_after
     )
 
+    # Also compute det and inv_det (divider output) for debug/verification.
+    det_mul = mul_tc(g11_after, g22_after, DET_WIDTH)
+    g12_r_sqr = mul_tc(g12_r, g12_r, DET_WIDTH)
+    g12_i_sqr = mul_tc(g12_i, g12_i, DET_WIDTH)
+    det_sub = add_tc(g12_r_sqr, g12_i_sqr, DET_WIDTH)
+    det = sub_tc(det_mul, det_sub, DET_WIDTH)
+    inv_det_fp = fixed_div_1_over_det(det)
+
     results: list[tuple[int, int]] = []
 
     # First row (result_row1 == 0 in hardware)
@@ -278,6 +287,12 @@ def compute_outputs_for_freq(freq: int) -> dict:
         "sor1": sor1,
         "g_before": (g11_before, g12_r, g12_i, g22_before),
         "g_after": (g11_after, g12_r, g12_i, g22_after),
+        "det": {
+            "det_mul": det_mul,
+            "det_sub": det_sub,
+            "det": det,
+            "inv_det_fp": inv_det_fp,
+        },
         "inv_g": (inv_g11, inv_g12_r, inv_g12_i, inv_g22),
         "outputs": results,
     }
@@ -288,7 +303,7 @@ def main() -> None:
     Compute and print software results for the first few freqs,
     so you can compare with RTL simulation at the corresponding addresses.
     """
-    max_freq = min(5, FREQ_NUM)
+    max_freq = min(2, FREQ_NUM)
     for freq in range(max_freq):
         print("=" * 60)
         print(f"[freq {freq}] Inputs (sor0, sor1):")
@@ -317,6 +332,20 @@ def main() -> None:
         print(f"    g12 = ({g12_r_a:12d}, {g12_i_a:12d})")
         print(f"    g22 = {g22_a:12d}")
 
+        # Print det and divider output (inv_det) for checking
+        det_info = info["det"]
+        det_mul = det_info["det_mul"]
+        det_sub = det_info["det_sub"]
+        det = det_info["det"]
+        inv_det_fp = det_info["inv_det_fp"]
+        print("\n  det check (all wrapped to hardware widths):")
+        print(f"    det_mul = g11*g22           = {det_mul:12d}")
+        print(f"    det_sub = |g12|^2 (r^2+i^2) = {det_sub:12d}")
+        print(f"    det     = det_mul - det_sub = {det:12d}")
+        print(f"    inv_det (divider, Q*.{DIVOUT_F_WIDTH}) = {inv_det_fp:16d}")
+        if det == 0:
+            print("    [warn] det == 0 -> inv_det is forced to 0 by model")
+        
         # Print inverse matrix elements
         inv_g11, inv_g12_r, inv_g12_i, inv_g22 = info["inv_g"]
         print("\n  inv(G) elements (fixed-point, scaled):")
