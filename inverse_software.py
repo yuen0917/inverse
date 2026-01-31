@@ -18,6 +18,7 @@ Input pattern:
 """
 
 from __future__ import annotations
+from datetime import datetime
 
 # ---------------------------------------------------------------------------
 # Parameters (mirror inverse_top.v)
@@ -311,7 +312,11 @@ def main() -> None:
         print(msg)
         f.write(msg + "\n")
 
+    now = datetime.now()
+    timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
     with open(out_path, "w", encoding="utf-8") as f:
+        f.write(f"Generated: {timestamp_str}\n\n")
         for freq in range(max_freq):
             log("=" * 60)
             log(f"[freq {freq}] Inputs (sor0, sor1):")
