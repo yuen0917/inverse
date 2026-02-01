@@ -1,5 +1,5 @@
 `timescale 1ns / 1ps
-module inverse_top #(
+module RTF_top #(
     parameter MIC_NUM              = 8,
     parameter SOR_NUM              = 2,
     parameter FREQ_NUM             = 257,

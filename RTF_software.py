@@ -1,5 +1,5 @@
 """
-Software model for `inverse_top` to verify hardware results.
+Software model for `RTF_top` to verify hardware results.
 
 All arithmetic is done with explicit fixed bit widths and two's‑complement
 wrapping, to mimic the Verilog implementation as closely as possible.
@@ -10,7 +10,7 @@ Simplification for now:
     - If det == 0, skip division and keep inv_det = 0.
 
 Input pattern:
-    Same as `inverse_top_tb.v`:
+    Same as `RTF_top_tb.v`:
         bram_rd_mem_real[i] = (i % 1000) - 500
         bram_rd_mem_imag[i] = ((i + 1) % 1000) - 500
     where
@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import datetime
 
 # ---------------------------------------------------------------------------
-# Parameters (mirror inverse_top.v)
+# Parameters (mirror RTF_top.v)
 # ---------------------------------------------------------------------------
 
 MIC_NUM = 8
@@ -111,7 +111,7 @@ def fixed_div_1_over_det(det: int) -> int:
 
 def tb_bram_value(index: int) -> tuple[int, int]:
     """
-    Reproduce the BRAM initialization used in inverse_top_tb.v:
+    Reproduce the BRAM initialization used in RTF_top_tb.v:
 
         bram_rd_mem_real[i] = (i % 1000) - 500
         bram_rd_mem_imag[i] = ((i + 1) % 1000) - 500
@@ -142,7 +142,7 @@ def build_af_for_freq(freq: int) -> tuple[list[complex], list[complex]]:
 
 
 # ---------------------------------------------------------------------------
-# Core algorithm: mirror inverse_top FSM computations (combinational view)
+# Core algorithm: mirror RTF_top FSM computations (combinational view)
 # ---------------------------------------------------------------------------
 
 def compute_g_matrix(
@@ -303,9 +303,9 @@ def main() -> None:
     """
     Compute and print software results for the first few freqs,
     so you can compare with RTL simulation at the corresponding addresses.
-    Also writes the same output to inverse_software_output.txt.
+    Also writes the same output to RTF_software_output.txt.
     """
-    out_path = "inverse_software_output.txt"
+    out_path = "RTF_software_output.txt"
     max_freq = min(257, FREQ_NUM)
 
     def log(msg: str = "") -> None:

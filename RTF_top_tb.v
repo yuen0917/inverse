@@ -1,5 +1,5 @@
 `timescale 1ns / 1ps
-module inverse_top_tb ();
+module RTF_top_tb ();
     localparam DATA_WIDTH         = 16;
     localparam BRAM_RD_ADDR_WIDTH = 32;
     localparam BRAM_WR_ADDR_WIDTH = 32;
@@ -31,7 +31,7 @@ module inverse_top_tb ();
     // Simulated BRAM for read data
     reg signed [DATA_WIDTH-1:0] bram_rd_mem_real [0:TOTAL_NUM-1];
     reg signed [DATA_WIDTH-1:0] bram_rd_mem_imag [0:TOTAL_NUM-1];
-    
+
     // Simulated BRAM for write data
     reg signed [DATA_WIDTH*3-1:0] bram_wr_mem_real [0:TOTAL_NUM-1];
     reg signed [DATA_WIDTH*3-1:0] bram_wr_mem_imag [0:TOTAL_NUM-1];
@@ -68,7 +68,7 @@ module inverse_top_tb ();
             // Scale down to fit in 16-bit signed range
             bram_rd_mem_real[i] = (i % 1000) - 500;  // Range: -500 to 499
             bram_rd_mem_imag[i] = ((i + 1) % 1000) - 500;
-            
+
             // Initialize write memory
             bram_wr_mem_real[i] = 0;
             bram_wr_mem_imag[i] = 0;
@@ -93,7 +93,7 @@ module inverse_top_tb ();
     always @(*) begin
         wr_addr_index = bram_wr_addr / BRAM_WR_INCREASE;
     end
-    
+
     always @(posedge clk) begin
         if (bram_wr_en && (bram_wr_we != 0)) begin
             // Convert address to index: addr / increment
@@ -103,11 +103,11 @@ module inverse_top_tb ();
                 bram_wr_mem_real[wr_addr_index] <= result_bram_wr_real;
                 bram_wr_mem_imag[wr_addr_index] <= result_bram_wr_imag;
                 bram_wr_valid[wr_addr_index]    <= 1'b1;
-                $display("[%0t] BRAM Write: addr=%0d (index=%0d), real=%0d, imag=%0d", 
+                $display("[%0t] BRAM Write: addr=%0d (index=%0d), real=%0d, imag=%0d",
                          $time, bram_wr_addr, wr_addr_index,
                          result_bram_wr_real, result_bram_wr_imag);
             end else if (bram_wr_addr >= 0) begin
-                $display("[%0t] Warning: BRAM write address out of range: addr=%0d (index=%0d)", 
+                $display("[%0t] Warning: BRAM write address out of range: addr=%0d (index=%0d)",
                          $time, bram_wr_addr, wr_addr_index);
             end
         end
@@ -120,7 +120,7 @@ module inverse_top_tb ();
         // Initialize
         rst_n = 0;
         start = 0;
-        
+
         // Reset
         #(PERIOD * 10);
         rst_n = 1;
@@ -139,32 +139,32 @@ module inverse_top_tb ();
                 start = 1'b1;
                 @(posedge clk);
                 start = 1'b0;
-                
+
                 wait (done == 1'b0);
                 wait (done == 1'b1);
-                
+
                 // Optional: display progress every 10 freqs
                 if ((f + 1) % 10 == 0) begin
                     $display("[%0t] Processed %0d/%0d frequencies", $time, f + 1, FREQ_NUM);
                 end
             end
 
-            $display("[%0t] Round %0d finished, all_freq_finish = %0d", 
+            $display("[%0t] Round %0d finished, all_freq_finish = %0d",
                      $time, round, all_freq_finish);
             #(PERIOD * 10);
         end
-        
+
         // Display some write results
         $display("========================================");
         $display("Sample Write Results (first 10 entries):");
         $display("========================================");
         for (i = 0; i < 10 && i < TOTAL_NUM; i = i + 1) begin
             if (bram_wr_valid[i]) begin
-                $display("  [%0d] real=%0d, imag=%0d", 
+                $display("  [%0d] real=%0d, imag=%0d",
                          i, bram_wr_mem_real[i], bram_wr_mem_imag[i]);
             end
         end
-        
+
         #(PERIOD * 10);
         $display("========================================");
         $display("Test Complete");

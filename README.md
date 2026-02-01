@@ -12,18 +12,18 @@ $$
 
 where $A$ is the RTF matrix (sources × microphones), $A^H$ is its conjugate transpose, and $\lambda$ is the regularization parameter. The result is applied to form beamformer weights or to solve regularized least-squares problems in the frequency domain.
 
-The hardware (`inverse_top.v`) implements this for a **2×2** complex $G = A^H A + \lambda I$: it builds $G$, computes $\det(G)$, $1/\det$, $G^{-1}$, and then $G^{-1} A^H$ (per frequency, per microphone), writing the result to BRAM.
+The hardware (`RTF_top.v`) implements this for a **2×2** complex $G = A^H A + \lambda I$: it builds $G$, computes $\det(G)$, $1/\det$, $G^{-1}$, and then $G^{-1} A^H$ (per frequency, per microphone), writing the result to BRAM.
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| **inverse_top.v** | Top-level RTL: FSM that reads RTF data from BRAM, computes $G = A^H A + \lambda I$, inverts the 2×2 $G$, computes $G^{-1} A^H$, and writes results to BRAM. Interfaces to an external divider IP for $1/\det$. |
-| **inverse_top_tb.v** | Verilog testbench for `inverse_top`: drives BRAM-style inputs, checks `done` / `all_freq_finish`, and can dump results for comparison with the software model. |
-| **inverse_software.py** | Python software model that mirrors the RTL (fixed-width, two’s-complement) to verify hardware. Uses the same BRAM pattern as `inverse_top_tb.v` and reproduces the FSM steps (G accumulation, det, inv_det, inv_G, result elements). |
+| **RTF_top.v** | Top-level RTL: FSM that reads RTF data from BRAM, computes $G = A^H A + \lambda I$, inverts the 2×2 $G$, computes $G^{-1} A^H$, and writes results to BRAM. Interfaces to an external divider IP for $1/\det$. |
+| **RTF_top_tb.v** | Verilog testbench for `RTF_top`: drives BRAM-style inputs, checks `done` / `all_freq_finish`, and can dump results for comparison with the software model. |
+| **inverse_software.py** | Python software model that mirrors the RTL (fixed-width, two’s-complement) to verify hardware. Uses the same BRAM pattern as `RTF_top_tb.v` and reproduces the FSM steps (G accumulation, det, inv_det, inv_G, result elements). |
 | **inverse_test.ipynb** | Jupyter notebook: builds free-field RTF matrix `Af` from geometry (DOA, mic positions, sample rate), then computes the regularized pseudo-inverse per frequency (`pinvA = inv(RTF^H @ RTF + λI) @ RTF^H`) with NumPy for reference / comparison. |
 | **hermitian.v** | Helper module: reads complex data from BRAM and writes its conjugate (Hermitian transpose in vector form). Can be used to prepare $A^H$ from $A$ if data is stored as $A$. |
-| **divider_test.v** | Test/example for the divider IP used by `inverse_top` (dividend/divisor in, quotient out). |
+| **divider_test.v** | Test/example for the divider IP used by `RTF_top` (dividend/divisor in, quotient out). |
 | **divider_top_tb.v** | Testbench for the divider top wrapper. |
 | **inverse_software_output.txt** | Sample or reference output from `inverse_software.py` (optional). |
 
@@ -31,10 +31,10 @@ The hardware (`inverse_top.v`) implements this for a **2×2** complex $G = A^H A
 
 The testbenches instantiate Vivado block-design wrappers that tie RTL to the divider IP:
 
-- **inverse_top_tb.v**
+- **RTF_top_tb.v**
   Instantiates **design_2**, which contains:
   - Vivado **Divider** IP (AXI-Stream or equivalent interface)
-  - **inverse_top.v** (drives dividend/divisor, consumes quotient)
+  - **RTF_top.v** (drives dividend/divisor, consumes quotient)
 
 - **divider_top_tb.v**
   Instantiates **design_1**, which contains:
@@ -42,10 +42,10 @@ The testbenches instantiate Vivado block-design wrappers that tie RTL to the div
   - **divider_test.v** (test wrapper around the divider)
 
 ```text
-inverse_top_tb
+RTF_top_tb
   └── design_2
         ├── Vivado Divider IP
-        └── inverse_top.v
+        └── RTF_top.v
 
 divider_top_tb
   └── design_1
@@ -53,7 +53,7 @@ divider_top_tb
         └── divider_test.v
 ```
 
-## State Machine (inverse_top.v)
+## State Machine (RTF_top.v)
 
 The RTL uses a single FSM. Each frequency bin is processed in one pass; the flow repeats for all `FREQ_NUM` bins.
 
@@ -76,7 +76,7 @@ The RTL uses a single FSM. Each frequency bin is processed in one pass; the flow
 
 Flow summary for one frequency: **S_IDLE → S_RD ⇄ S_UPDATE_RD_ADDR** (until all RTF samples read) **→ S_PLUS → S_CALDET1 → S_CALDET2 → S_INVDET → S_SETDIV → S_WAITDIV** (until divider done) **→ S_CALINVG → S_CALRESULT → S_WR ⇄ S_UPDATE_WR_ADDR** (until all result samples written) **→ S_DONE → S_IDLE**. Then the same sequence runs for the next frequency until `freq_sample_cnt` has covered all `FREQ_NUM` bins.
 
-## Parameters (inverse_top.v)
+## Parameters (RTF_top.v)
 
 - **MIC_NUM**, **SOR_NUM**, **FREQ_NUM**: number of mics, sources, and frequency bins.
 - **DATA_WIDTH**: bit width of RTF real/imag (e.g. 16).
@@ -93,10 +93,10 @@ Flow summary for one frequency: **S_IDLE → S_RD ⇄ S_UPDATE_RD_ADDR** (until 
    Run `inverse_software.py` (e.g. `python inverse_software.py`). It uses the same BRAM pattern as the testbench and prints or saves results for comparison with RTL simulation.
 
 3. **RTL simulation**
-   Simulate `inverse_top_tb.v` with your Verilog simulator (e.g. instantiate `design_2` or your top that contains `inverse_top` + divider). Compare outputs with `inverse_software.py` or with exported results from the notebook.
+   Simulate `RTF_top_tb.v` with your Verilog simulator (e.g. instantiate `design_2` or your top that contains `RTF_top` + divider). Compare outputs with `inverse_software.py` or with exported results from the notebook.
 
 ## Dependencies
 
 - **inverse_test.ipynb**: NumPy, Jupyter.
 - **inverse_software.py**: Python 3 with standard library (no NumPy required for the fixed-point model).
-- **RTL**: Verilog simulator; divider IP must match the interface and width parameters used in `inverse_top.v`.
+- **RTL**: Verilog simulator; divider IP must match the interface and width parameters used in `RTF_top.v`.
