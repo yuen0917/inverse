@@ -120,18 +120,18 @@ module RTF_top #(
     wire signed [DIVOUT_TDATA_WIDTH-1:0]   inv_det;
 
     // inverse G register
-    reg signed [DATA_WIDTH*3-1:0] inv_g11_real;
-    reg signed [DATA_WIDTH*3-1:0] inv_g12_real;
-    reg signed [DATA_WIDTH*3-1:0] inv_g12_imag;
-    reg signed [DATA_WIDTH*3-1:0] inv_g22_real;
+    reg signed [DATA_WIDTH*4-1:0] inv_g11_real;
+    reg signed [DATA_WIDTH*4-1:0] inv_g12_real;
+    reg signed [DATA_WIDTH*4-1:0] inv_g12_imag;
+    reg signed [DATA_WIDTH*4-1:0] inv_g22_real;
 
     // result elements (avoid timing violation)
-    reg signed [DATA_WIDTH*3-1:0] result_real_element0;
-    reg signed [DATA_WIDTH*3-1:0] result_real_element1;
-    reg signed [DATA_WIDTH*3-1:0] result_real_element2;
-    reg signed [DATA_WIDTH*3-1:0] result_imag_element0;
-    reg signed [DATA_WIDTH*3-1:0] result_imag_element1;
-    reg signed [DATA_WIDTH*3-1:0] result_imag_element2;
+    reg signed [DATA_WIDTH*4-1:0] result_real_element0;
+    reg signed [DATA_WIDTH*4-1:0] result_real_element1;
+    reg signed [DATA_WIDTH*4-1:0] result_real_element2;
+    reg signed [DATA_WIDTH*4-1:0] result_imag_element0;
+    reg signed [DATA_WIDTH*4-1:0] result_imag_element1;
+    reg signed [DATA_WIDTH*4-1:0] result_imag_element2;
 
 
     assign inv_det = ($signed(inv_det_q) <<< (DIVOUT_F_WIDTH - 1)) + $signed(inv_det_f);
