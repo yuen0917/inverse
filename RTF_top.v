@@ -15,14 +15,14 @@ module RTF_top #(
     parameter DIVOUT_TDATA_WIDTH   = 64,
     parameter DIVOUT_F_WIDTH       = 32,
     parameter DIVISOR_TDATA_WIDTH  = 32,
-    parameter DIVIDEND_TDATA_WIDTH = 32,
-    parameter LAMBDA               = 0
+    parameter DIVIDEND_TDATA_WIDTH = 16,
+    parameter LAMBDA               = 32'd2684355
 )(
     input                                        clk,
     input                                        rst_n,
     input                                        start,
     output reg                                   done,
-    output                                       all_freq_finish,
+    output reg                                   all_freq_finish,
 
     // read bram data
     input      signed [DATA_WIDTH-1:0]           af_bram_rd_real,
@@ -50,18 +50,19 @@ module RTF_top #(
     localparam S_IDLE           = 0;  // wait start
     localparam S_RD             = 1;  // read bram data
     localparam S_UPDATE_RD_ADDR = 2;  // update bram read address
-    localparam S_PLUS           = 3;  // plus lambda * I to G
-    localparam S_CALDET1        = 4;  // calculate g11 * g22
-    localparam S_CALDET2        = 5;  // calculate det - (g12_real_acc_sqr + g12_imag_acc_sqr)
-    localparam S_INVDET         = 6;  // set dividend and divisor to divider
-    localparam S_SETDIV         = 7;  // set dividend and divisor valid to divider
-    localparam S_WAITDIV        = 8;  // wait divider result
-    localparam S_CALINVG        = 9;  // calculate inverse of G
-    localparam S_CALRESULT      = 10; // calculate result elements
-    localparam S_WR             = 11; // write result to bram
-    localparam S_UPDATE_WR_ADDR = 12; // update bram write address
-    localparam S_DONE           = 13; // done
-    localparam S_RESTART        = 14; // return to S_RD
+    localparam S_WAIT_RD_DELAY  = 3;  // wait bram read delay
+    localparam S_PLUS           = 4;  // plus lambda * I to G
+    localparam S_CALDET1        = 5;  // calculate g11 * g22
+    localparam S_CALDET2        = 6;  // calculate det - (g12_real_acc_sqr + g12_imag_acc_sqr)
+    localparam S_INVDET         = 7;  // set dividend and divisor to divider
+    localparam S_SETDIV         = 8;  // set dividend and divisor valid to divider
+    localparam S_WAITDIV        = 9;  // wait divider result
+    localparam S_CALINVG        = 10;  // calculate inverse of G
+    localparam S_CALRESULT      = 11; // calculate result elements
+    localparam S_WR             = 12; // write result to bram
+    localparam S_UPDATE_WR_ADDR = 13; // update bram write address
+    localparam S_DONE           = 14; // done
+    localparam S_RESTART        = 15; // return to S_RD
 
     localparam TOTAL_NUM = MIC_NUM * SOR_NUM * FREQ_NUM; // 8 * 2 * 257 = 4112
     localparam PER_FREQ  = MIC_NUM * SOR_NUM;
@@ -90,9 +91,11 @@ module RTF_top #(
     reg       flag_rd_sor1;
     reg       result_row1;
     reg [8:0] freq_sample_cnt;
+    reg       wait_rd_change; 
 
     assign bram_wr_we = (state == S_WR) ? {BRAM_WR_WE_WIDTH{1'b1}} : {BRAM_WR_WE_WIDTH{1'b0}};
     assign bram_wr_en = (state == S_WR);
+    
 
     reg signed [DATA_WIDTH-1:0] sor0_temp_real [0:MIC_NUM-1];
     reg signed [DATA_WIDTH-1:0] sor0_temp_imag [0:MIC_NUM-1];
@@ -136,7 +139,6 @@ module RTF_top #(
 
 
     assign inv_det         = ($signed(inv_det_q) <<< (DIVOUT_F_WIDTH - 1)) + $signed(inv_det_f);
-    assign all_freq_finish = (freq_sample_cnt == FREQ_NUM - 1) ? 1 : 0;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -150,7 +152,8 @@ module RTF_top #(
         case (state)
             S_IDLE:           next_state = (start_delay[LATENCY]) ? S_RD : S_IDLE;
             S_RD:             next_state = (rd_cnt == PER_FREQ - 1) ? S_PLUS : S_UPDATE_RD_ADDR;
-            S_UPDATE_RD_ADDR: next_state = S_RD;
+            S_UPDATE_RD_ADDR: next_state = S_WAIT_RD_DELAY;
+            S_WAIT_RD_DELAY:  next_state = S_RD;
             S_PLUS:           next_state = S_CALDET1;
             S_CALDET1:        next_state = S_CALDET2;
             S_CALDET2:        next_state = S_INVDET;
@@ -161,7 +164,7 @@ module RTF_top #(
             S_CALRESULT:      next_state = S_WR;
             S_WR:             next_state = (wr_cnt == PER_FREQ - 1) ? S_DONE : S_UPDATE_WR_ADDR;
             S_UPDATE_WR_ADDR: next_state = S_CALRESULT;
-            S_DONE:           next_state = (all_freq_finish == 1) ? S_IDLE : S_RESTART;
+            S_DONE:           next_state = (freq_sample_cnt == FREQ_NUM - 1) ? S_IDLE : S_RESTART;
             S_RESTART:        next_state = S_RD;
             default:          next_state = S_IDLE;
         endcase
@@ -181,8 +184,9 @@ module RTF_top #(
                 sor1_temp_real[i] <= 0;
                 sor1_temp_imag[i] <= 0;
             end
-            flag_rd_sor1 <= 0;
-            result_row1  <= 0;
+            flag_rd_sor1   <= 0;
+            result_row1    <= 0;
+            wait_rd_change <= 0;
 
             // G register
             g11_real_acc <= 0;
@@ -217,10 +221,12 @@ module RTF_top #(
             result_bram_wr_real  <= 0;
             result_bram_wr_imag  <= 0;
             done                 <= 0;
+            all_freq_finish      <= 0;
         end else begin
             case (state)
                 S_IDLE: begin // state 0
                     done                 <= 0;
+                    all_freq_finish      <= 0;
                     if (start_delay[LATENCY]) begin
                         for (i = 0; i < MIC_NUM; i = i + 1) begin
                             sor0_temp_real[i] <= 0;
@@ -256,21 +262,25 @@ module RTF_top #(
                     end
                 end
                 S_RD: begin // state 1
-                    rd_cnt <= (rd_cnt == PER_FREQ - 1) ? rd_cnt : rd_cnt + 1;
-                    if (flag_rd_sor1) begin
-                        sor1_temp_real[sor_cnt] <= af_bram_rd_real;
-                        sor1_temp_imag[sor_cnt] <= af_bram_rd_imag;
-                        g22_real_acc            <= g22_real_acc + $signed(af_bram_rd_real) * $signed(af_bram_rd_real)
-                                                                + $signed(af_bram_rd_imag) * $signed(af_bram_rd_imag);
-                        g12_real_acc            <= g12_real_acc + $signed(sor0_temp_real[sor_cnt]) * $signed(af_bram_rd_real)
-                                                                + $signed(sor0_temp_imag[sor_cnt]) * $signed(af_bram_rd_imag);
-                        g12_imag_acc            <= g12_imag_acc + $signed(sor0_temp_real[sor_cnt]) * $signed(af_bram_rd_imag)
-                                                                - $signed(sor0_temp_imag[sor_cnt]) * $signed(af_bram_rd_real);
+                    if (wait_rd_change) begin
+                        rd_cnt <= (rd_cnt == PER_FREQ - 1) ? rd_cnt : rd_cnt + 1;
+                        if (flag_rd_sor1) begin
+                            sor1_temp_real[sor_cnt] <= af_bram_rd_real;
+                            sor1_temp_imag[sor_cnt] <= af_bram_rd_imag;
+                            g22_real_acc            <= g22_real_acc + $signed(af_bram_rd_real) * $signed(af_bram_rd_real)
+                                                                    + $signed(af_bram_rd_imag) * $signed(af_bram_rd_imag);
+                            g12_real_acc            <= g12_real_acc + $signed(sor0_temp_real[sor_cnt]) * $signed(af_bram_rd_real)
+                                                                    + $signed(sor0_temp_imag[sor_cnt]) * $signed(af_bram_rd_imag);
+                            g12_imag_acc            <= g12_imag_acc + $signed(sor0_temp_real[sor_cnt]) * $signed(af_bram_rd_imag)
+                                                                    - $signed(sor0_temp_imag[sor_cnt]) * $signed(af_bram_rd_real);
+                        end else begin
+                            sor0_temp_real[sor_cnt] <= af_bram_rd_real;
+                            sor0_temp_imag[sor_cnt] <= af_bram_rd_imag;
+                            g11_real_acc            <= g11_real_acc + $signed(af_bram_rd_real) * $signed(af_bram_rd_real)
+                                                                    + $signed(af_bram_rd_imag) * $signed(af_bram_rd_imag);
+                        end
                     end else begin
-                        sor0_temp_real[sor_cnt] <= af_bram_rd_real;
-                        sor0_temp_imag[sor_cnt] <= af_bram_rd_imag;
-                        g11_real_acc            <= g11_real_acc + $signed(af_bram_rd_real) * $signed(af_bram_rd_real)
-                                                                + $signed(af_bram_rd_imag) * $signed(af_bram_rd_imag);
+                        wait_rd_change <= 1'b1;
                     end
                 end
                 S_UPDATE_RD_ADDR: begin // state 2
@@ -278,29 +288,34 @@ module RTF_top #(
                     flag_rd_sor1 <= (sor_cnt == MIC_NUM - 1) ? ~flag_rd_sor1 : flag_rd_sor1;
                     bram_rd_addr <= bram_rd_addr + BRAM_RD_INCREASE;
                 end
-                S_PLUS: begin // state 3
-                    bram_rd_addr <= bram_rd_addr + BRAM_RD_INCREASE;
-                    flag_rd_sor1 <= 0;
-                    rd_cnt       <= 0;
-                    sor_cnt      <= 0;
-                    g11_real_acc <= g11_real_acc + $signed(LAMBDA);
-                    g22_real_acc <= g22_real_acc + $signed(LAMBDA);
+                S_WAIT_RD_DELAY: begin // state 3
+                    // just wait
+                    // wait_rd_change <= 1'b1;
                 end
-                S_CALDET1: begin // state 4
+                S_PLUS: begin // state 4
+                    wait_rd_change <= 0;
+                    bram_rd_addr   <= bram_rd_addr + BRAM_RD_INCREASE;
+                    flag_rd_sor1   <= 0;
+                    rd_cnt         <= 0;
+                    sor_cnt        <= 0;
+                    g11_real_acc   <= g11_real_acc + $signed(LAMBDA);
+                    g22_real_acc   <= g22_real_acc + $signed(LAMBDA);
+                end
+                S_CALDET1: begin // state 5
                     det <= g11_real_acc * g22_real_acc;
                 end
-                S_CALDET2: begin // state 5
+                S_CALDET2: begin // state 6
                     det <= det - (g12_real_acc_sqr + g12_imag_acc_sqr);
                 end
-                S_INVDET: begin // state 6
+                S_INVDET: begin // state 7
                     s_axis_divisor_tdata  <= det;
                     s_axis_dividend_tdata <= 1;
                 end
-                S_SETDIV: begin // state 7
+                S_SETDIV: begin // state 8
                     s_axis_divisor_tvalid  <= 1;
                     s_axis_dividend_tvalid <= 1;
                 end
-                S_WAITDIV: begin // state 8
+                S_WAITDIV: begin // state 9
                     s_axis_divisor_tvalid  <= 0;
                     s_axis_dividend_tvalid <= 0;
                     if (m_axis_dout_tvalid) begin
@@ -308,13 +323,13 @@ module RTF_top #(
                         inv_det_f <= m_axis_dout_tdata[DIVOUT_F_WIDTH-1:0];
                     end
                 end
-                S_CALINVG: begin // state 9
+                S_CALINVG: begin // state 10
                     inv_g11_real <=  g22_real_acc * inv_det;
                     inv_g12_real <= -g12_real_acc * inv_det;
                     inv_g12_imag <= -g12_imag_acc * inv_det;
                     inv_g22_real <=  g11_real_acc * inv_det;
                 end
-                S_CALRESULT: begin // state 10
+                S_CALRESULT: begin // state 11
                     if (result_row1) begin
                         result_real_element0 <=  inv_g12_real * sor0_temp_real[sor_cnt];
                         result_real_element1 <= -inv_g12_imag * sor0_temp_imag[sor_cnt];
@@ -331,17 +346,17 @@ module RTF_top #(
                         result_imag_element2 <=  inv_g12_imag * sor1_temp_real[sor_cnt];
                     end
                 end
-                S_WR: begin // state 11
+                S_WR: begin // state 12
                     wr_cnt              <= (wr_cnt == PER_FREQ - 1) ? wr_cnt : wr_cnt + 1;
                     result_bram_wr_real <= result_real_element0 + result_real_element1 + result_real_element2;
                     result_bram_wr_imag <= result_imag_element0 + result_imag_element1 + result_imag_element2;
                 end
-                S_UPDATE_WR_ADDR: begin // state 12
+                S_UPDATE_WR_ADDR: begin // state 13
                     sor_cnt      <= (sor_cnt == MIC_NUM - 1) ? 0 : sor_cnt + 1;
                     result_row1  <= (sor_cnt == MIC_NUM - 1) ? ~result_row1 : result_row1;
                     bram_wr_addr <= bram_wr_addr + BRAM_WR_INCREASE;
                 end
-                S_DONE: begin // state 13
+                S_DONE: begin // state 14
                     result_row1     <= 0;
                     sor_cnt         <= 0;
                     wr_cnt          <= 0;
@@ -349,11 +364,13 @@ module RTF_top #(
                     bram_wr_addr    <= bram_wr_addr + BRAM_WR_INCREASE; // for next bram write start
                     if (freq_sample_cnt == FREQ_NUM - 1) begin
                         freq_sample_cnt <= 0;
+                        all_freq_finish <= 1;
                     end else begin
                         freq_sample_cnt <= freq_sample_cnt + 1;
+                        all_freq_finish <= 0;
                     end
                 end
-                S_RESTART: begin // state 14
+                S_RESTART: begin // state 15
                     for (i = 0; i < MIC_NUM; i = i + 1) begin
                         sor0_temp_real[i] <= 0;
                         sor0_temp_imag[i] <= 0;
@@ -431,6 +448,7 @@ module RTF_top #(
                     result_bram_wr_real  <= 0;
                     result_bram_wr_imag  <= 0;
                     done                 <= 0;
+                    all_freq_finish      <= 0;
                 end
             endcase
         end

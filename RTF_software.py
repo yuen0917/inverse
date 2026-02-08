@@ -19,6 +19,7 @@ Input pattern:
 
 from __future__ import annotations
 from datetime import datetime
+import numpy as np
 
 # ---------------------------------------------------------------------------
 # Parameters (mirror RTF_top.v)
@@ -29,20 +30,33 @@ SOR_NUM = 2
 FREQ_NUM = 257
 
 DATA_WIDTH = 16
-ACC_WIDTH = DATA_WIDTH * 2          # g11, g12, g22 accumulation (32)
-INV_G_WIDTH = DATA_WIDTH * 3        # inv_g* and result elements (48)
-DET_WIDTH = DATA_WIDTH * 2          # det width (32), maps to DIVISOR_TDATA_WIDTH
+ACC_WIDTH = DATA_WIDTH * 4          # g11, g12, g22 accumulation (32)
+INV_G_WIDTH = DATA_WIDTH * 8        # inv_g* and result elements (96)
+DET_WIDTH = DATA_WIDTH * 4          # det width (64), maps to DIVISOR_TDATA_WIDTH
+INPUT_FRAC_BITS = 14
+INPUT_Q_FORMAT = "s2.14"
 
 # Divider configuration (mirror inverse_top.v)
 DIVOUT_TDATA_WIDTH = 64
-DIVOUT_F_WIDTH = 31                 # 32 fractional bits after divider
+DIVOUT_F_WIDTH = 55                 # 48 fractional bits after divider
 DIVIDEND_TDATA_WIDTH = 32
 DIVISOR_TDATA_WIDTH = 32
 
-LAMBDA = int("00000000", 16)    # same numeric value as 32'h00000000
+# Regularization lambda in same scale as G (Q4.28 when INPUT_FRAC_BITS=14).
+# 0.01 in Q4.28 = round(0.01 * 2^(2*INPUT_FRAC_BITS)) = 2,684,355.
+LAMBDA = 2684355
+
+# Float comparison (set False to skip)
+ENABLE_FLOAT_COMPARE = True
 
 PER_FREQ = MIC_NUM * SOR_NUM
 TOTAL_NUM = MIC_NUM * SOR_NUM * FREQ_NUM
+
+REAL_INPUT_PATH = "./RTF_input_Real.txt"
+IMAG_INPUT_PATH = "./RTF_input_Imag.txt"
+
+BRAM_REAL: list[int] | None = None
+BRAM_IMAG: list[int] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +123,26 @@ def fixed_div_1_over_det(det: int) -> int:
 # Testbench‑style BRAM pattern
 # ---------------------------------------------------------------------------
 
+def load_bram_inputs(
+    real_path: str, imag_path: str, expected_len: int
+) -> tuple[list[int], list[int]]:
+    """Load BRAM inputs from text files (one integer per line)."""
+    with open(real_path, "r", encoding="utf-8") as f_real:
+        real_vals = [int(line.strip()) for line in f_real if line.strip()]
+    with open(imag_path, "r", encoding="utf-8") as f_imag:
+        imag_vals = [int(line.strip()) for line in f_imag if line.strip()]
+
+    if len(real_vals) < expected_len or len(imag_vals) < expected_len:
+        raise ValueError(
+            "Input length mismatch: "
+            f"real={len(real_vals)}, imag={len(imag_vals)}, "
+            f"expected={expected_len}"
+        )
+
+    # Keep only the first expected_len samples if files are longer.
+    return real_vals[:expected_len], imag_vals[:expected_len]
+
+
 def tb_bram_value(index: int) -> tuple[int, int]:
     """
     Reproduce the BRAM initialization used in RTF_top_tb.v:
@@ -118,8 +152,12 @@ def tb_bram_value(index: int) -> tuple[int, int]:
 
     Returned values are clipped/wrapped to DATA_WIDTH bits.
     """
-    real = (index % 1000) - 500
-    imag = ((index + 1) % 1000) - 500
+    if BRAM_REAL is not None and BRAM_IMAG is not None:
+        real = BRAM_REAL[index]
+        imag = BRAM_IMAG[index]
+    else:
+        real = (index % 1000) - 500
+        imag = ((index + 1) % 1000) - 500
     return to_sint(real, DATA_WIDTH), to_sint(imag, DATA_WIDTH)
 
 
@@ -299,12 +337,58 @@ def compute_outputs_for_freq(freq: int) -> dict:
     }
 
 
+def compute_float_pinv_for_freq(freq: int) -> np.ndarray:
+    """
+    Compute floating-point pinvA = inv(A^H A + lambda*I) * A^H for comparison.
+    Inputs use Q-format scaling to float domain.
+    """
+    sor0, sor1 = build_af_for_freq(freq)
+    scale_in = 2 ** INPUT_FRAC_BITS
+    a0 = np.array([complex(int(x.real), int(x.imag)) for x in sor0], dtype=np.complex128) / scale_in
+    a1 = np.array([complex(int(x.real), int(x.imag)) for x in sor1], dtype=np.complex128) / scale_in
+    A = np.stack([a0, a1], axis=1)  # (MIC_NUM, SOR_NUM)
+    G = A.conj().T @ A
+    lambda_float = LAMBDA / (2 ** (2 * INPUT_FRAC_BITS))
+    G_reg = G + lambda_float * np.eye(SOR_NUM, dtype=np.complex128)
+    inv_g = np.linalg.inv(G_reg)
+    pinv_a = inv_g @ A.conj().T  # (SOR_NUM, MIC_NUM)
+    return pinv_a
+
+
+def compute_float_stages_for_freq(freq: int) -> dict:
+    """
+    Compute floating-point stages for comparison:
+    G (before/after lambda), det, inv_det, inv(G), and outputs (pinvA).
+    """
+    sor0, sor1 = build_af_for_freq(freq)
+    scale_in = 2 ** INPUT_FRAC_BITS
+    a0 = np.array([complex(int(x.real), int(x.imag)) for x in sor0], dtype=np.complex128) / scale_in
+    a1 = np.array([complex(int(x.real), int(x.imag)) for x in sor1], dtype=np.complex128) / scale_in
+    A = np.stack([a0, a1], axis=1)  # (MIC_NUM, SOR_NUM)
+    G = A.conj().T @ A
+    lambda_float = LAMBDA / (2 ** (2 * INPUT_FRAC_BITS))
+    G_reg = G + lambda_float * np.eye(SOR_NUM, dtype=np.complex128)
+    det = np.linalg.det(G_reg)
+    inv_g = np.linalg.inv(G_reg)
+    inv_det = 1.0 / det
+    pinv_a = inv_g @ A.conj().T  # (SOR_NUM, MIC_NUM)
+    return {
+        "G_before": G,
+        "G_after": G_reg,
+        "det": det,
+        "inv_det": inv_det,
+        "inv_g": inv_g,
+        "pinv_a": pinv_a,
+    }
+
+
 def main() -> None:
     """
     Compute and print software results for the first few freqs,
     so you can compare with RTL simulation at the corresponding addresses.
     Also writes the same output to RTF_software_output.txt.
     """
+    global BRAM_REAL, BRAM_IMAG
     out_path = "./RTF_software_output.txt"
     max_freq = min(257, FREQ_NUM)
 
@@ -312,11 +396,28 @@ def main() -> None:
         print(msg)
         f.write(msg + "\n")
 
+    def fmt_c(z: complex) -> str:
+        return f"{z.real:+.6e}{z.imag:+.6e}j"
+
     now = datetime.now()
     timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
     with open(out_path, "w", encoding="utf-8") as f:
-        f.write(f"Generated: {timestamp_str}\n\n")
+        try:
+            BRAM_REAL, BRAM_IMAG = load_bram_inputs(
+                REAL_INPUT_PATH, IMAG_INPUT_PATH, TOTAL_NUM
+            )
+        except FileNotFoundError:
+            BRAM_REAL, BRAM_IMAG = None, None
+            log("[warn] Input files not found, using testbench pattern.")
+        except ValueError as exc:
+            BRAM_REAL, BRAM_IMAG = None, None
+            log(f"[warn] {exc}; using testbench pattern.")
+
+        f.write(f"Generated: {timestamp_str}\n")
+        f.write(
+            f"Input Q format: {INPUT_Q_FORMAT} (float = val / 2^{INPUT_FRAC_BITS})\n\n"
+        )
         for freq in range(max_freq):
             log("=" * 60)
             log(f"[freq {freq}] Inputs (sor0, sor1):")
@@ -370,6 +471,101 @@ def main() -> None:
             log("\n  Outputs (row0 then row1, 16 per freq):")
             for idx, (r, i) in enumerate(info["outputs"]):
                 log(f"    out_idx={idx:2d}  real={r:16d}  imag={i:16d}")
+
+            # Float comparison against fixed outputs (scaled back to float domain)
+            if ENABLE_FLOAT_COMPARE:
+                float_info = compute_float_stages_for_freq(freq)
+                pinv_a = float_info["pinv_a"]
+                scale_g = 2 ** (2 * INPUT_FRAC_BITS)
+                scale_det = 2 ** (4 * INPUT_FRAC_BITS)
+                scale_inv_det = 2 ** (4 * INPUT_FRAC_BITS - DIVOUT_F_WIDTH)
+                scale_inv_g = 2 ** (DIVOUT_F_WIDTH - 2 * INPUT_FRAC_BITS)
+                scale_out = 2 ** (DIVOUT_F_WIDTH - INPUT_FRAC_BITS)
+
+                log("\n  Float vs fixed stages (float / fixed / error):")
+                g_before_f = float_info["G_before"]
+                g_after_f = float_info["G_after"]
+                g_before_fx = np.array(
+                    [
+                        [complex(g11_b, 0), complex(g12_r, g12_i)],
+                        [complex(g12_r, -g12_i), complex(g22_b, 0)],
+                    ],
+                    dtype=np.complex128,
+                ) / scale_g
+                g_after_fx = np.array(
+                    [
+                        [complex(g11_a, 0), complex(g12_r_a, g12_i_a)],
+                        [complex(g12_r_a, -g12_i_a), complex(g22_a, 0)],
+                    ],
+                    dtype=np.complex128,
+                ) / scale_g
+
+                for r in range(2):
+                    for c in range(2):
+                        err = abs(g_before_f[r, c] - g_before_fx[r, c])
+                        log(
+                            "    G_before[%d,%d] float=%s  fixed=%s  err=%.3e"
+                            % (r, c, fmt_c(g_before_f[r, c]), fmt_c(g_before_fx[r, c]), err)
+                        )
+                for r in range(2):
+                    for c in range(2):
+                        err = abs(g_after_f[r, c] - g_after_fx[r, c])
+                        log(
+                            "    G_after [%d,%d] float=%s  fixed=%s  err=%.3e"
+                            % (r, c, fmt_c(g_after_f[r, c]), fmt_c(g_after_fx[r, c]), err)
+                        )
+
+                det_f = float_info["det"]
+                det_fx = det / scale_det
+                det_err = abs(det_f - det_fx)
+                log(
+                    "    det        float=%s  fixed=%s  err=%.3e"
+                    % (fmt_c(det_f), fmt_c(det_fx), det_err)
+                )
+
+                inv_det_f = float_info["inv_det"]
+                inv_det_fx = inv_det_fp * scale_inv_det
+                inv_det_err = abs(inv_det_f - inv_det_fx)
+                log(
+                    "    inv_det    float=%s  fixed=%s  err=%.3e"
+                    % (fmt_c(inv_det_f), fmt_c(inv_det_fx), inv_det_err)
+                )
+
+                inv_g_f = float_info["inv_g"]
+                inv_g_fx = np.array(
+                    [
+                        [complex(inv_g11, 0), complex(inv_g12_r, inv_g12_i)],
+                        [complex(inv_g12_r, -inv_g12_i), complex(inv_g22, 0)],
+                    ],
+                    dtype=np.complex128,
+                ) / scale_inv_g
+                for r in range(2):
+                    for c in range(2):
+                        err = abs(inv_g_f[r, c] - inv_g_fx[r, c])
+                        log(
+                            "    inv(G)[%d,%d] float=%s  fixed=%s  err=%.3e"
+                            % (r, c, fmt_c(inv_g_f[r, c]), fmt_c(inv_g_fx[r, c]), err)
+                        )
+
+                log("\n  Float vs fixed comparison (pinvA):")
+                for mic in range(MIC_NUM):
+                    fp_row0 = pinv_a[0, mic]
+                    fp_row1 = pinv_a[1, mic]
+                    fx_row0 = info["outputs"][mic]
+                    fx_row1 = info["outputs"][MIC_NUM + mic]
+                    fx_row0_c = complex(fx_row0[0] / scale_out, fx_row0[1] / scale_out)
+                    fx_row1_c = complex(fx_row1[0] / scale_out, fx_row1[1] / scale_out)
+                    err0 = abs(fp_row0 - fx_row0_c)
+                    err1 = abs(fp_row1 - fx_row1_c)
+                    log(
+                        "    mic=%2d  row0 float=%s  fixed=%s  err=%.3e"
+                        "  row1 float=%s  fixed=%s  err=%.3e"
+                        % (
+                            mic,
+                            fmt_c(fp_row0), fmt_c(fx_row0_c), err0,
+                            fmt_c(fp_row1), fmt_c(fx_row1_c), err1,
+                        )
+                    )
 
     print(f"\nOutput also written to {out_path}")
 
